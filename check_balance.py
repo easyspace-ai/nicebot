@@ -1,7 +1,8 @@
 """Check actual USDC balance on Polygon."""
 from web3 import Web3
+from rpc_config import RPC_URL
 
-w3 = Web3(Web3.HTTPProvider('https://polygon-rpc.com'))
+w3 = Web3(Web3.HTTPProvider(RPC_URL))
 usdc_address = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174'
 wallet = '0x6eA221C3a41c76E90D1cdAA01BCF6922171Eb46E'
 

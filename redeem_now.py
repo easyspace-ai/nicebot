@@ -6,7 +6,7 @@ print('='*60)
 print('Redeem Positions from Token IDs')
 print('='*60)
 
-RPC_URL = "https://polygon-rpc.com"
+RPC_URL = Config.RPC_URL
 w3 = Web3(Web3.HTTPProvider(RPC_URL))
 
 # Get wallet

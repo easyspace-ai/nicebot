@@ -99,7 +99,7 @@ class OrderManager:
             from web3 import Web3
 
             # Connect to Polygon RPC
-            w3 = Web3(Web3.HTTPProvider("https://polygon-rpc.com"))
+            w3 = Web3(Web3.HTTPProvider(Config.RPC_URL))
             if not w3.is_connected():
                 logger.error("Cannot connect to Polygon RPC")
                 return 0.0

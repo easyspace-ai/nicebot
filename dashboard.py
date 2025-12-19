@@ -164,7 +164,7 @@ async def get_orders():
                 "filled_at": o.filled_at.isoformat() if o.filled_at else None,
                 "error_message": o.error_message
             }
-            for o in state.recent_orders[:20]  # Last 20 orders
+            for o in state.recent_orders[:100]  # Last 100 orders
         ]
 
         return {

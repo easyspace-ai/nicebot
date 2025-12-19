@@ -1,7 +1,8 @@
 """Check all USDC token balances."""
 from web3 import Web3
+from rpc_config import RPC_URL
 
-w3 = Web3(Web3.HTTPProvider('https://polygon-rpc.com'))
+w3 = Web3(Web3.HTTPProvider(RPC_URL))
 wallet = '0x6eA221C3a41c76E90D1cdAA01BCF6922171Eb46E'
 
 # USDC.e (bridged - what Polymarket uses)

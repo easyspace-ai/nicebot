@@ -9,7 +9,7 @@ class AutoRedeemer:
     """Automatically redeems winning positions."""
 
     def __init__(self):
-        self.rpc_url = "https://polygon-rpc.com"
+        self.rpc_url = Config.RPC_URL
         self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
 
         if not self.w3.is_connected():

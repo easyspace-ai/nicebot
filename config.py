@@ -21,10 +21,12 @@ class Config:
     SPREAD_OFFSET: float = float(os.getenv("SPREAD_OFFSET", "0.01"))
     CHECK_INTERVAL_SECONDS: int = int(os.getenv("CHECK_INTERVAL_SECONDS", "60"))
     ORDER_PLACEMENT_MINUTES_BEFORE: int = int(os.getenv("ORDER_PLACEMENT_MINUTES_BEFORE", "5"))
+    REDEEM_CHECK_INTERVAL_SECONDS: int = int(os.getenv("REDEEM_CHECK_INTERVAL_SECONDS", "60"))
 
     # API Configuration
     GAMMA_API_BASE_URL: str = os.getenv("GAMMA_API_BASE_URL", "https://gamma-api.polymarket.com")
     CLOB_API_URL: str = os.getenv("CLOB_API_URL", "https://clob.polymarket.com")
+    RPC_URL: str = os.getenv("RPC_URL", "https://polygon-rpc.com")
     POLYMARKET_API_KEY: Optional[str] = os.getenv("POLYMARKET_API_KEY")
     POLYMARKET_API_SECRET: Optional[str] = os.getenv("POLYMARKET_API_SECRET")
     POLYMARKET_API_PASSPHRASE: Optional[str] = os.getenv("POLYMARKET_API_PASSPHRASE", "")

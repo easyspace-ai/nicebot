@@ -2,7 +2,7 @@
 from web3 import Web3
 from config import Config
 
-RPC_URL = "https://polygon-rpc.com"
+RPC_URL = Config.RPC_URL
 USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 

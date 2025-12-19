@@ -6,7 +6,7 @@ import json
 import os
 from datetime import datetime, timedelta
 from typing import List, Dict
-from models import Market, OrderRecord, OrderStatus, BotState
+from models import Market, OrderRecord, OrderStatus, BotState, OrderSide
 from market_discovery import MarketDiscovery
 from order_manager import OrderManager
 from auto_redeem import AutoRedeemer
@@ -40,6 +40,8 @@ class PolymarketBot:
 
         # Order persistence file
         self.orders_file = "bot_orders.json"
+        self.order_history_file = "order_history.json"
+        self.order_history: Dict[str, OrderRecord] = {}
 
         # Lock for thread safety
         self.lock = threading.Lock()
@@ -62,6 +64,7 @@ class PolymarketBot:
             logger.info(f"Initial USDC balance: ${self.state.usdc_balance:.2f}")
 
         # Load persisted orders from file
+        self._load_order_history()
         self._load_orders_from_file()
 
         # Recover existing orders from orderbook
@@ -79,9 +82,10 @@ class PolymarketBot:
             with self.lock:
                 self.state.last_check = datetime.now()
 
-            # Step 0: Check for redeemable positions every hour
+            # Step 0: Check for redeemable positions
             if (self.last_redemption_check is None or
-                datetime.now() - self.last_redemption_check > timedelta(hours=1)):
+                datetime.now() - self.last_redemption_check >
+                timedelta(seconds=Config.REDEEM_CHECK_INTERVAL_SECONDS)):
 
                 logger.info("Checking for redeemable positions...")
                 redeemed_count = self.auto_redeemer.check_and_redeem_all()
@@ -199,6 +203,8 @@ class PolymarketBot:
 
                 # Save orders to file for persistence
                 self._save_orders_to_file()
+                for order in orders:
+                    self._upsert_order_history(order)
 
                 logger.info(
                     f"Successfully placed {len(orders)} orders for "
@@ -227,6 +233,8 @@ class PolymarketBot:
         for condition_id, orders in list(self.active_orders.items()):
             market = self.tracked_markets.get(condition_id)
             if not market:
+                if self._refresh_orphaned_orders(condition_id, orders):
+                    status_changed = True
                 continue
 
             # Skip if market is too old
@@ -245,6 +253,9 @@ class PolymarketBot:
                             f"{order.status.value} -> {updated_order.status.value}"
                         )
                         status_changed = True
+                    self._upsert_order_history(updated_order)
+                else:
+                    self._upsert_order_history(order)
 
             now = datetime.now()
 
@@ -262,6 +273,10 @@ class PolymarketBot:
                             self.merged_amounts.get(condition_id, 0.0) + merged_amount
                         )
                     self.last_merge_attempt[condition_id] = now
+                    if self._all_positions_merged(orders, self.merged_amounts.get(condition_id, 0.0)):
+                        self.positions_sold[condition_id] = True
+                        status_changed = True
+                        self._save_orders_to_file()
 
             # Sell any one-sided positions 1 minute before market end
             if (not self.positions_sold.get(condition_id, False) and
@@ -308,6 +323,78 @@ class PolymarketBot:
         # Save to file if any status changed
         if status_changed:
             self._save_orders_to_file()
+
+    def _refresh_orphaned_orders(self, condition_id: str, orders: List[OrderRecord]) -> bool:
+        """Refresh order statuses even if the market is no longer tracked."""
+        updated_orders = []
+        changed = False
+
+        for order in orders:
+            if order.status in [OrderStatus.PLACED, OrderStatus.PARTIALLY_FILLED]:
+                try:
+                    updated_order = self.order_manager.check_order_status(order)
+                    if updated_order.status != order.status:
+                        changed = True
+                    order = updated_order
+                except Exception as e:
+                    logger.warning(f"Could not refresh order {order.order_id}: {e}")
+
+            self._upsert_order_history(order)
+
+            if order.status in [OrderStatus.PLACED, OrderStatus.PARTIALLY_FILLED, OrderStatus.FILLED]:
+                updated_orders.append(order)
+            else:
+                changed = True
+
+        if updated_orders:
+            self.active_orders[condition_id] = updated_orders
+            if not self.positions_sold.get(condition_id, False):
+                now = datetime.now()
+                last_attempt = self.last_merge_attempt.get(condition_id)
+                if last_attempt is None or (now - last_attempt).total_seconds() >= 30:
+                    market_stub = self._build_orphan_market(condition_id, updated_orders)
+                    merged_amount = self.order_manager.merge_positions_if_possible(
+                        market_stub,
+                        updated_orders,
+                        already_merged_amount=self.merged_amounts.get(condition_id, 0.0)
+                    )
+                    if merged_amount > 0:
+                        self.merged_amounts[condition_id] = (
+                            self.merged_amounts.get(condition_id, 0.0) + merged_amount
+                        )
+                        changed = True
+                    self.last_merge_attempt[condition_id] = now
+                    if self._all_positions_merged(
+                        updated_orders,
+                        self.merged_amounts.get(condition_id, 0.0)
+                    ):
+                        self.positions_sold[condition_id] = True
+                        changed = True
+            return changed
+
+        logger.info(
+            f"Orphaned orders cleared for {condition_id}; "
+            "no live orders remain"
+        )
+        self.active_orders.pop(condition_id, None)
+        self.orders_placed.pop(condition_id, None)
+        self.positions_sold.pop(condition_id, None)
+        self.last_merge_attempt.pop(condition_id, None)
+        self.merged_amounts.pop(condition_id, None)
+        return True
+
+    def _build_orphan_market(self, condition_id: str, orders: List[OrderRecord]) -> Market:
+        """Create a minimal market object for orphaned orders."""
+        now_ts = int(datetime.now().timestamp())
+        market_slug = orders[0].market_slug if orders else f"orphaned-{condition_id[:16]}"
+        return Market(
+            condition_id=condition_id,
+            market_slug=market_slug,
+            question="Orphaned market",
+            start_timestamp=now_ts - 60,
+            end_timestamp=now_ts + 3600,
+            outcomes=[]
+        )
 
     def _place_fallback_orders_if_idle(self, upcoming_markets: List[Market]):
         """Place orders on the next upcoming market if the bot is idle."""
@@ -359,6 +446,8 @@ class PolymarketBot:
                 self.orders_placed[next_market.condition_id] = True
                 self.active_orders[next_market.condition_id] = orders
                 self._save_orders_to_file()
+                for order in orders:
+                    self._upsert_order_history(order)
 
                 logger.info(
                     f"Successfully placed {len(orders)} fallback orders for "
@@ -402,6 +491,23 @@ class PolymarketBot:
                 except Exception as e:
                     logger.warning(f"Could not get filled size for order {order.order_id}: {e}")
         return filled
+
+    def _all_positions_merged(self, orders: List[OrderRecord], merged_amount: float) -> bool:
+        """Return True if all filled positions have been merged."""
+        filled_amounts = self._get_filled_amounts(orders)
+        remaining_yes = filled_amounts["YES"] - merged_amount
+        remaining_no = filled_amounts["NO"] - merged_amount
+
+        has_live_orders = any(
+            o.status in [OrderStatus.PLACED, OrderStatus.PARTIALLY_FILLED]
+            for o in orders
+        )
+
+        return (
+            remaining_yes <= 0.0
+            and remaining_no <= 0.0
+            and not has_live_orders
+        )
 
     def _sell_remaining_positions(
         self,
@@ -472,6 +578,82 @@ class PolymarketBot:
 
         except Exception as e:
             logger.error(f"Error in _sell_remaining_positions: {e}", exc_info=True)
+
+    def _upsert_order_history(self, order: OrderRecord):
+        """Insert or update an order in history."""
+        self.order_history[order.order_id] = order
+
+    def _sync_history_from_active_orders(self):
+        """Sync active orders into history."""
+        for orders in self.active_orders.values():
+            for order in orders:
+                self._upsert_order_history(order)
+
+    def _load_order_history(self):
+        """Load order history from file for dashboard display."""
+        try:
+            if not os.path.exists(self.order_history_file):
+                return
+
+            with open(self.order_history_file, "r") as f:
+                history_data = json.load(f)
+
+            if not isinstance(history_data, list):
+                return
+
+            for order_dict in history_data:
+                try:
+                    order = OrderRecord(
+                        order_id=order_dict["order_id"],
+                        market_slug=order_dict["market_slug"],
+                        condition_id=order_dict["condition_id"],
+                        token_id=order_dict["token_id"],
+                        outcome=order_dict["outcome"],
+                        side=OrderSide(order_dict["side"]),
+                        price=order_dict["price"],
+                        size=order_dict["size"],
+                        size_usd=order_dict["size_usd"],
+                        status=OrderStatus(order_dict["status"]),
+                        created_at=datetime.fromisoformat(order_dict["created_at"]),
+                        filled_at=datetime.fromisoformat(order_dict["filled_at"]) if order_dict.get("filled_at") else None,
+                        error_message=order_dict.get("error_message")
+                    )
+                    self._upsert_order_history(order)
+                except Exception as e:
+                    logger.warning(f"Could not load history order {order_dict.get('order_id', 'unknown')}: {e}")
+
+            logger.info(f"Loaded {len(self.order_history)} orders from {self.order_history_file}")
+
+        except Exception as e:
+            logger.error(f"Error loading order history: {e}", exc_info=True)
+
+    def _save_order_history(self):
+        """Save order history to file."""
+        try:
+            history_list = []
+            for order in self.order_history.values():
+                history_list.append({
+                    "order_id": order.order_id,
+                    "market_slug": order.market_slug,
+                    "condition_id": order.condition_id,
+                    "token_id": order.token_id,
+                    "outcome": order.outcome,
+                    "side": order.side.value,
+                    "price": order.price,
+                    "size": order.size,
+                    "size_usd": order.size_usd,
+                    "status": order.status.value,
+                    "created_at": order.created_at.isoformat() if order.created_at else None,
+                    "filled_at": order.filled_at.isoformat() if order.filled_at else None,
+                    "error_message": order.error_message
+                })
+
+            history_list.sort(key=lambda o: o.get("created_at") or "", reverse=True)
+            with open(self.order_history_file, "w") as f:
+                json.dump(history_list, f, indent=2)
+
+        except Exception as e:
+            logger.error(f"Error saving order history: {e}", exc_info=True)
 
     def _recover_existing_orders(self):
         """Recover existing orders from orderbook on startup."""
@@ -569,6 +751,9 @@ class PolymarketBot:
             with open(self.orders_file, 'w') as f:
                 json.dump(orders_data, f, indent=2)
 
+            self._sync_history_from_active_orders()
+            self._save_order_history()
+
             logger.debug(f"Saved {sum(len(orders) for orders in self.active_orders.values())} orders to {self.orders_file}")
 
         except Exception as e:
@@ -617,6 +802,9 @@ class PolymarketBot:
                         logger.warning(f"Could not load order {order_dict.get('order_id', 'unknown')}: {e}")
 
             logger.info(f"Loaded {loaded_count} orders from {self.orders_file}")
+
+            # Check for old orders that aren't in tracked markets and finalize their statuses
+            self._finalize_orphaned_orders()
 
             # Update order lists for dashboard
             with self.lock:
@@ -701,6 +889,74 @@ class PolymarketBot:
         except Exception as e:
             logger.error(f"Error finalizing order statuses: {e}", exc_info=True)
 
+    def _finalize_orphaned_orders(self):
+        """
+        Finalize order statuses for loaded orders that don't have a tracked market.
+        This handles orders loaded from file on startup for markets that have ended.
+        """
+        try:
+            orphaned_conditions = [
+                cid for cid in self.active_orders.keys()
+                if cid not in self.tracked_markets
+            ]
+
+            if not orphaned_conditions:
+                return
+
+            logger.info(f"Found {len(orphaned_conditions)} orphaned order groups - checking statuses")
+            status_changed = False
+
+            for condition_id in orphaned_conditions:
+                orders = self.active_orders.get(condition_id, [])
+                if not orders:
+                    continue
+
+                market_slug = orders[0].market_slug if orders else "unknown"
+                logger.info(f"Checking orphaned orders for market: {market_slug}")
+
+                for order in orders:
+                    # Skip already-finalized statuses
+                    if order.status in [OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.FAILED]:
+                        continue
+
+                    # Check current status from orderbook
+                    try:
+                        updated_order = self.order_manager.check_order_status(order)
+
+                        # Log status changes
+                        if updated_order.status != order.status:
+                            logger.info(
+                                f"Order {order.order_id[:16]}... status updated: "
+                                f"{order.status.value} -> {updated_order.status.value}"
+                            )
+                            status_changed = True
+
+                        # If still showing as PLACED/PARTIALLY_FILLED but market is orphaned,
+                        # it was likely cancelled or expired
+                        if updated_order.status in [OrderStatus.PLACED, OrderStatus.PARTIALLY_FILLED]:
+                            logger.info(
+                                f"Order {order.order_id[:16]}... still shows as {order.status.value} "
+                                f"for orphaned market - marking as CANCELLED"
+                            )
+                            order.status = OrderStatus.CANCELLED
+                            status_changed = True
+
+                    except Exception as e:
+                        logger.warning(f"Could not check status for orphaned order {order.order_id}: {e}")
+                        # If we can't check and it's not already finalized, mark as cancelled
+                        if order.status in [OrderStatus.PLACED, OrderStatus.PARTIALLY_FILLED]:
+                            logger.info(f"Marking unreachable orphaned order as CANCELLED")
+                            order.status = OrderStatus.CANCELLED
+                            status_changed = True
+
+            # Save if any statuses changed
+            if status_changed:
+                self._save_orders_to_file()
+                logger.info("Saved updated orphaned order statuses to file")
+
+        except Exception as e:
+            logger.error(f"Error finalizing orphaned orders: {e}", exc_info=True)
+
     def _update_order_lists(self):
         """Update order lists in state for dashboard."""
         all_orders = []
@@ -715,7 +971,12 @@ class PolymarketBot:
             o for o in all_orders
             if o.status in [OrderStatus.PLACED, OrderStatus.PARTIALLY_FILLED]
         ]
-        recent = all_orders[:50]  # Last 50 orders
+        history_orders = list(self.order_history.values())
+        history_orders.sort(
+            key=lambda o: o.created_at if o.created_at else datetime.min,
+            reverse=True
+        )
+        recent = history_orders[:100]  # Last 100 orders
 
         self.state.pending_orders = pending
         self.state.recent_orders = recent

@@ -6,7 +6,7 @@ print('Setting USDC Allowance for Polymarket Trading')
 print('='*60)
 
 # Polygon RPC endpoint
-RPC_URL = "https://polygon-rpc.com"
+RPC_URL = Config.RPC_URL
 
 # Contract addresses on Polygon
 USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"  # USDC on Polygon
