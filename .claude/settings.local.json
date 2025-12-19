@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python test_connection.py:*)",
+      "Bash(py --version)",
+      "Bash(py -m pip install:*)",
+      "Bash(py test_connection.py:*)",
+      "Bash(py -c:*)",
+      "Bash(findstr:*)",
+      "Bash(py main.py:*)",
+      "Bash(curl:*)",
+      "Bash(py -m json.tool:*)",
+      "Bash(timeout 10 ping:*)",
+      "Bash(tasklist:*)",
+      "Bash(taskkill:*)",
+      "Bash(python -c \"import os; os.system\\(''taskkill /F /PID 37364''\\)\")",
+      "Bash(py:*)",
+      "Bash(python:*)",
+      "Bash(dir:*)",
+      "Bash(pip install:*)",
+      "Bash(start /B py main.py)",
+      "Bash(timeout:*)",
+      "Bash(git init:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}

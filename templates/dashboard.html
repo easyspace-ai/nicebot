@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Polymarket Limit Order Bot</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #0f0f1e;
+            color: #e0e0e0;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            color: #fff;
+            margin-bottom: 10px;
+            font-size: 2em;
+        }
+
+        .subtitle {
+            color: #888;
+            margin-bottom: 30px;
+        }
+
+        .status-bar {
+            background: #1a1a2e;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+        }
+
+        .status-item {
+            text-align: center;
+        }
+
+        .status-label {
+            color: #888;
+            font-size: 0.9em;
+            margin-bottom: 5px;
+        }
+
+        .status-value {
+            color: #fff;
+            font-size: 1.5em;
+            font-weight: bold;
+        }
+
+        .status-value.running {
+            color: #4CAF50;
+        }
+
+        .status-value.error {
+            color: #f44336;
+        }
+
+        .section {
+            background: #1a1a2e;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+
+        .section-title {
+            color: #fff;
+            font-size: 1.3em;
+            margin-bottom: 15px;
+            border-bottom: 2px solid #2a2a3e;
+            padding-bottom: 10px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th {
+            background: #2a2a3e;
+            color: #fff;
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+        }
+
+        td {
+            padding: 12px;
+            border-bottom: 1px solid #2a2a3e;
+        }
+
+        tr:hover {
+            background: #252540;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 0.85em;
+            font-weight: 600;
+        }
+
+        .badge.placed {
+            background: #4CAF50;
+            color: white;
+        }
+
+        .badge.filled {
+            background: #2196F3;
+            color: white;
+        }
+
+        .badge.cancelled {
+            background: #757575;
+            color: white;
+        }
+
+        .badge.failed {
+            background: #f44336;
+            color: white;
+        }
+
+        .badge.buy {
+            background: #4CAF50;
+            color: white;
+        }
+
+        .badge.sell {
+            background: #f44336;
+            color: white;
+        }
+
+        .countdown {
+            color: #FFC107;
+            font-weight: bold;
+        }
+
+        .countdown.soon {
+            color: #f44336;
+        }
+
+        .logs {
+            background: #0a0a1a;
+            border-radius: 4px;
+            padding: 15px;
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 0.85em;
+        }
+
+        .log-line {
+            margin-bottom: 5px;
+            color: #b0b0b0;
+        }
+
+        .log-line.error {
+            color: #f44336;
+        }
+
+        .log-line.warning {
+            color: #FFC107;
+        }
+
+        .log-line.info {
+            color: #2196F3;
+        }
+
+        .empty-state {
+            text-align: center;
+            color: #666;
+            padding: 40px;
+        }
+
+        .refresh-info {
+            color: #666;
+            font-size: 0.9em;
+            text-align: center;
+            margin-top: 10px;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .loading {
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🤖 Polymarket Limit Order Bot</h1>
+        <p class="subtitle">Automated liquidity provision for BTC 15-minute markets</p>
+
+        <div class="status-bar">
+            <div class="status-item">
+                <div class="status-label">Status</div>
+                <div class="status-value running" id="status">●</div>
+            </div>
+            <div class="status-item">
+                <div class="status-label">USDC Balance</div>
+                <div class="status-value" id="balance">$0.00</div>
+            </div>
+            <div class="status-item">
+                <div class="status-label">Active Markets</div>
+                <div class="status-value" id="markets-count">0</div>
+            </div>
+            <div class="status-item">
+                <div class="status-label">Pending Orders</div>
+                <div class="status-value" id="orders-count">0</div>
+            </div>
+            <div class="status-item">
+                <div class="status-label">Last Check</div>
+                <div class="status-value" id="last-check" style="font-size: 1em;">Never</div>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-title">Upcoming BTC 15-Minute Markets</div>
+            <div id="markets-content">
+                <div class="empty-state loading">Loading markets...</div>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-title">Open Orders</div>
+            <div id="pending-orders-content">
+                <div class="empty-state loading">Loading orders...</div>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-title">Recent Orders</div>
+            <div id="recent-orders-content">
+                <div class="empty-state loading">Loading orders...</div>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-title">Bot Logs</div>
+            <div class="logs" id="logs-content">
+                <div class="log-line">Loading logs...</div>
+            </div>
+        </div>
+
+        <div class="refresh-info">Auto-refreshing every 5 seconds</div>
+    </div>
+
+    <script>
+        function formatTime(isoString) {
+            if (!isoString) return 'N/A';
+            const date = new Date(isoString);
+            return date.toLocaleTimeString();
+        }
+
+        function formatDateTime(isoString) {
+            if (!isoString) return 'N/A';
+            const date = new Date(isoString);
+            return date.toLocaleString();
+        }
+
+        async function updateStatus() {
+            try {
+                const response = await fetch('/api/status');
+                const data = await response.json();
+
+                document.getElementById('status').textContent = data.is_running ? '● Running' : '○ Stopped';
+                document.getElementById('balance').textContent = `$${data.usdc_balance.toFixed(2)}`;
+                document.getElementById('markets-count').textContent = data.active_markets_count;
+                document.getElementById('orders-count').textContent = data.pending_orders_count;
+                document.getElementById('last-check').textContent = data.last_check ? formatTime(data.last_check) : 'Never';
+            } catch (error) {
+                console.error('Error updating status:', error);
+            }
+        }
+
+        async function updateMarkets() {
+            try {
+                const response = await fetch('/api/markets');
+                const data = await response.json();
+
+                const container = document.getElementById('markets-content');
+
+                if (data.markets.length === 0) {
+                    container.innerHTML = '<div class="empty-state">No upcoming markets found</div>';
+                    return;
+                }
+
+                let html = '<table><thead><tr><th>Market</th><th>Starts</th><th>Countdown</th><th>Outcomes</th><th>Status</th></tr></thead><tbody>';
+
+                for (const market of data.markets) {
+                    const countdownClass = market.time_until_start < 600 ? 'countdown soon' : 'countdown';
+                    const statusBadge = market.orders_placed ? '<span class="badge placed">Orders Placed</span>' : '<span class="badge" style="background: #666;">Waiting</span>';
+
+                    let outcomesHtml = '';
+                    for (const outcome of market.outcomes) {
+                        if (outcome.best_bid && outcome.best_ask) {
+                            outcomesHtml += `<div>${outcome.outcome}: $${outcome.best_bid.toFixed(2)} / $${outcome.best_ask.toFixed(2)}</div>`;
+                        }
+                    }
+
+                    html += `
+                        <tr>
+                            <td><strong>${market.question}</strong><br><small style="color: #666;">${market.market_slug}</small></td>
+                            <td>${formatDateTime(market.start_datetime)}</td>
+                            <td><span class="${countdownClass}">${market.time_until_start_formatted}</span></td>
+                            <td>${outcomesHtml || 'Loading...'}</td>
+                            <td>${statusBadge}</td>
+                        </tr>
+                    `;
+                }
+
+                html += '</tbody></table>';
+                container.innerHTML = html;
+            } catch (error) {
+                console.error('Error updating markets:', error);
+            }
+        }
+
+        async function updateOrders() {
+            try {
+                const response = await fetch('/api/orders');
+                const data = await response.json();
+
+                // Pending orders
+                const pendingContainer = document.getElementById('pending-orders-content');
+                if (data.pending_orders.length === 0) {
+                    pendingContainer.innerHTML = '<div class="empty-state">No open orders</div>';
+                } else {
+                    let html = '<table><thead><tr><th>Market</th><th>Outcome</th><th>Side</th><th>Price</th><th>Size</th><th>Status</th><th>Created</th></tr></thead><tbody>';
+
+                    for (const order of data.pending_orders) {
+                        const sideBadge = `<span class="badge ${order.side.toLowerCase()}">${order.side}</span>`;
+                        const statusBadge = `<span class="badge ${order.status.toLowerCase()}">${order.status}</span>`;
+
+                        html += `
+                            <tr>
+                                <td>${order.market_slug}</td>
+                                <td>${order.outcome}</td>
+                                <td>${sideBadge}</td>
+                                <td>$${order.price.toFixed(3)}</td>
+                                <td>${order.size.toFixed(2)} ($${order.size_usd.toFixed(2)})</td>
+                                <td>${statusBadge}</td>
+                                <td>${formatTime(order.created_at)}</td>
+                            </tr>
+                        `;
+                    }
+
+                    html += '</tbody></table>';
+                    pendingContainer.innerHTML = html;
+                }
+
+                // Recent orders
+                const recentContainer = document.getElementById('recent-orders-content');
+                if (data.recent_orders.length === 0) {
+                    recentContainer.innerHTML = '<div class="empty-state">No recent orders</div>';
+                } else {
+                    let html = '<table><thead><tr><th>Market</th><th>Outcome</th><th>Side</th><th>Price</th><th>Size</th><th>Status</th><th>Created</th></tr></thead><tbody>';
+
+                    for (const order of data.recent_orders) {
+                        const sideBadge = `<span class="badge ${order.side.toLowerCase()}">${order.side}</span>`;
+                        const statusBadge = `<span class="badge ${order.status.toLowerCase()}">${order.status}</span>`;
+
+                        html += `
+                            <tr>
+                                <td>${order.market_slug}</td>
+                                <td>${order.outcome}</td>
+                                <td>${sideBadge}</td>
+                                <td>$${order.price.toFixed(3)}</td>
+                                <td>${order.size.toFixed(2)} ($${order.size_usd.toFixed(2)})</td>
+                                <td>${statusBadge}</td>
+                                <td>${formatTime(order.created_at)}</td>
+                            </tr>
+                        `;
+                    }
+
+                    html += '</tbody></table>';
+                    recentContainer.innerHTML = html;
+                }
+            } catch (error) {
+                console.error('Error updating orders:', error);
+            }
+        }
+
+        async function updateLogs() {
+            try {
+                const response = await fetch('/api/logs');
+                const data = await response.json();
+
+                const container = document.getElementById('logs-content');
+                if (data.logs && data.logs.length > 0) {
+                    let html = '';
+                    for (const line of data.logs.reverse()) {
+                        let className = 'log-line';
+                        if (line.includes('ERROR')) className += ' error';
+                        else if (line.includes('WARNING')) className += ' warning';
+                        else if (line.includes('INFO')) className += ' info';
+
+                        html += `<div class="${className}">${line}</div>`;
+                    }
+                    container.innerHTML = html;
+                    container.scrollTop = container.scrollHeight;
+                }
+            } catch (error) {
+                console.error('Error updating logs:', error);
+            }
+        }
+
+        async function updateAll() {
+            await Promise.all([
+                updateStatus(),
+                updateMarkets(),
+                updateOrders(),
+                updateLogs()
+            ]);
+        }
+
+        // Initial update
+        updateAll();
+
+        // Auto-refresh every 5 seconds
+        setInterval(updateAll, 5000);
+    </script>
+</body>
+</html>
