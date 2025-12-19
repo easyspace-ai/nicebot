@@ -110,6 +110,9 @@ class PolymarketBot:
             # Step 4: Check status of active orders
             self._check_active_orders()
 
+            # Step 4.5: Place fallback orders if idle and no positions pending
+            self._place_fallback_orders_if_idle(upcoming_markets)
+
             # Step 5: Clean up old markets and orders
             self._cleanup_old_markets()
 
@@ -219,6 +222,8 @@ class PolymarketBot:
 
     def _check_active_orders(self):
         """Check status of all active orders."""
+        status_changed = False
+
         for condition_id, orders in list(self.active_orders.items()):
             market = self.tracked_markets.get(condition_id)
             if not market:
@@ -239,6 +244,7 @@ class PolymarketBot:
                             f"Order {order.order_id} status changed: "
                             f"{order.status.value} -> {updated_order.status.value}"
                         )
+                        status_changed = True
 
             now = datetime.now()
 
@@ -271,6 +277,8 @@ class PolymarketBot:
                     )
                     cancelled_count = self.order_manager.cancel_orders(unfilled)
                     logger.info(f"Cancelled {cancelled_count} orders")
+                    if cancelled_count > 0:
+                        status_changed = True
 
                 self._sell_remaining_positions(
                     market,
@@ -293,7 +301,82 @@ class PolymarketBot:
                         f"Market ended. Cancelling {len(unfilled)} unfilled orders for "
                         f"{market.market_slug}"
                     )
-                    self.order_manager.cancel_orders(unfilled)
+                    cancelled_count = self.order_manager.cancel_orders(unfilled)
+                    if cancelled_count > 0:
+                        status_changed = True
+
+        # Save to file if any status changed
+        if status_changed:
+            self._save_orders_to_file()
+
+    def _place_fallback_orders_if_idle(self, upcoming_markets: List[Market]):
+        """Place orders on the next upcoming market if the bot is idle."""
+        if not upcoming_markets:
+            return
+
+        has_live_orders = False
+        for orders in self.active_orders.values():
+            if any(o.status in [OrderStatus.PLACED, OrderStatus.PARTIALLY_FILLED] for o in orders):
+                has_live_orders = True
+                break
+
+        if has_live_orders:
+            return
+
+        has_unprocessed_positions = False
+        for condition_id, orders in self.active_orders.items():
+            if self.positions_sold.get(condition_id, False):
+                continue
+            if any(o.status in [OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED] for o in orders):
+                has_unprocessed_positions = True
+                break
+
+        if has_unprocessed_positions:
+            return
+
+        now_ts = datetime.now().timestamp()
+        future_markets = [m for m in upcoming_markets if m.start_timestamp > now_ts]
+        if not future_markets:
+            return
+
+        next_market = min(future_markets, key=lambda m: m.start_timestamp)
+        if self.orders_placed.get(next_market.condition_id, False):
+            return
+
+        logger.info(
+            f"Idle state detected. Placing fallback orders for next market: "
+            f"{next_market.market_slug} (starts in {next_market.time_until_start/60:.1f} minutes)"
+        )
+
+        try:
+            orders = self.order_manager.place_simple_test_orders(
+                market=next_market,
+                price=0.49,
+                size=10.0
+            )
+
+            if orders:
+                self.orders_placed[next_market.condition_id] = True
+                self.active_orders[next_market.condition_id] = orders
+                self._save_orders_to_file()
+
+                logger.info(
+                    f"Successfully placed {len(orders)} fallback orders for "
+                    f"{next_market.market_slug}"
+                )
+                for order in orders:
+                    logger.info(
+                        f"  - {order.side.value} {order.outcome} @ "
+                        f"${order.price:.2f} x {order.size:.2f} shares"
+                    )
+            else:
+                logger.error(f"Failed to place fallback orders for {next_market.market_slug}")
+
+        except Exception as e:
+            logger.error(
+                f"Error placing fallback orders for {next_market.market_slug}: {e}",
+                exc_info=True
+            )
 
     def _normalize_outcome(self, outcome: str) -> str:
         """Normalize outcome names for YES/NO classification."""
@@ -543,16 +626,26 @@ class PolymarketBot:
             logger.error(f"Error loading orders from file: {e}", exc_info=True)
 
     def _cleanup_old_markets(self):
-        """Remove old markets and orders from tracking."""
+        """Remove old markets and update order statuses."""
         cutoff = datetime.now().timestamp() - 86400  # 24 hours ago
 
-        # Clean up tracked markets
+        # Find old markets
         old_conditions = [
             cid for cid, market in self.tracked_markets.items()
             if market.end_timestamp < cutoff
         ]
 
+        if not old_conditions:
+            return
+
+        logger.info(f"Cleaning up {len(old_conditions)} old markets and updating order statuses")
+
         for condition_id in old_conditions:
+            # Update order statuses before cleanup
+            if condition_id in self.active_orders:
+                self._finalize_old_order_statuses(condition_id)
+
+            # Remove from tracking
             logger.debug(f"Cleaning up old market: {condition_id}")
             self.tracked_markets.pop(condition_id, None)
             self.orders_placed.pop(condition_id, None)
@@ -560,6 +653,53 @@ class PolymarketBot:
             self.positions_sold.pop(condition_id, None)
             self.last_merge_attempt.pop(condition_id, None)
             self.merged_amounts.pop(condition_id, None)
+
+        # Save updated statuses to file
+        self._save_orders_to_file()
+
+    def _finalize_old_order_statuses(self, condition_id: str):
+        """
+        Finalize order statuses for an old market before cleanup.
+
+        Args:
+            condition_id: Market condition ID
+        """
+        try:
+            orders = self.active_orders.get(condition_id, [])
+            if not orders:
+                return
+
+            market_slug = orders[0].market_slug if orders else "unknown"
+            logger.info(f"Finalizing order statuses for old market: {market_slug}")
+
+            for order in orders:
+                # Skip already-finalized statuses
+                if order.status in [OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.FAILED]:
+                    continue
+
+                # Check current status from orderbook
+                try:
+                    updated_order = self.order_manager.check_order_status(order)
+
+                    # If still showing as PLACED/PARTIALLY_FILLED after market is old,
+                    # it was likely cancelled or expired
+                    if updated_order.status in [OrderStatus.PLACED, OrderStatus.PARTIALLY_FILLED]:
+                        logger.info(
+                            f"Order {order.order_id[:16]}... still shows as {order.status.value} "
+                            f"for old market - marking as CANCELLED"
+                        )
+                        order.status = OrderStatus.CANCELLED
+
+                except Exception as e:
+                    logger.warning(f"Could not check final status for order {order.order_id}: {e}")
+                    # If we can't check, assume it's cancelled (market is >24h old)
+                    if order.status in [OrderStatus.PLACED, OrderStatus.PARTIALLY_FILLED]:
+                        order.status = OrderStatus.CANCELLED
+
+            logger.info(f"Finalized {len(orders)} orders for {market_slug}")
+
+        except Exception as e:
+            logger.error(f"Error finalizing order statuses: {e}", exc_info=True)
 
     def _update_order_lists(self):
         """Update order lists in state for dashboard."""
