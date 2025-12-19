@@ -230,6 +230,12 @@
             </div>
         </div>
 
+        <!-- Balance Warning Banner -->
+        <div id="balance-warning" style="display:none; background-color: #fff3cd; border: 1px solid #ffc107; border-radius: 8px; padding: 15px; margin: 20px 0; color: #856404;">
+            <strong>⚠️ Low Balance Warning</strong>
+            <div id="balance-warning-message" style="margin-top: 8px;"></div>
+        </div>
+
         <div class="section">
             <div class="section-title">Upcoming BTC 15-Minute Markets</div>
             <div id="markets-content">
@@ -284,6 +290,23 @@
                 document.getElementById('markets-count').textContent = data.active_markets_count;
                 document.getElementById('orders-count').textContent = data.pending_orders_count;
                 document.getElementById('last-check').textContent = data.last_check ? formatTime(data.last_check) : 'Never';
+
+                // Handle balance warning
+                const warningDiv = document.getElementById('balance-warning');
+                const warningMessage = document.getElementById('balance-warning-message');
+
+                if (data.balance_warning) {
+                    let message = `Current balance ($${data.usdc_balance.toFixed(2)}) is below the minimum needed ($${data.min_balance_needed.toFixed(2)}) to place orders.`;
+
+                    if (data.balance_error_count > 0) {
+                        message += `<br><strong>${data.balance_error_count}</strong> order(s) failed due to insufficient balance or allowance.`;
+                    }
+
+                    warningMessage.innerHTML = message;
+                    warningDiv.style.display = 'block';
+                } else {
+                    warningDiv.style.display = 'none';
+                }
             } catch (error) {
                 console.error('Error updating status:', error);
             }

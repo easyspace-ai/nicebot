@@ -44,7 +44,24 @@ async def get_status():
     """Get current bot status."""
     try:
         bot = get_bot_instance()
+        logger.debug(f"API: bot instance id={id(bot)}, is_running={bot.state.is_running}")
         state = bot.get_state()
+
+        # Check if bot has sufficient balance to place orders
+        from config import Config
+        from models import OrderStatus
+        # Only need USDC for BUY orders (2 outcomes × 1 BUY side each)
+        # SELL orders would require tokens we don't have yet
+        min_balance_needed = Config.ORDER_SIZE_USD * 2
+        has_sufficient_balance = state.usdc_balance >= min_balance_needed if state.usdc_balance is not None else False
+
+        # Count failed orders with balance errors
+        balance_error_count = 0
+        for order in state.pending_orders:
+            if (order.status == OrderStatus.FAILED and
+                order.error_message and
+                ('balance' in order.error_message.lower() or 'allowance' in order.error_message.lower())):
+                balance_error_count += 1
 
         # Format data for JSON response
         return {
@@ -56,7 +73,10 @@ async def get_status():
             "last_error": state.last_error,
             "active_markets_count": len(state.active_markets),
             "pending_orders_count": len(state.pending_orders),
-            "wallet_address": bot.order_manager.address
+            "wallet_address": bot.order_manager.address,
+            "balance_warning": not has_sufficient_balance,  # NEW
+            "balance_error_count": balance_error_count,  # NEW
+            "min_balance_needed": min_balance_needed  # NEW
         }
     except Exception as e:
         logger.error(f"Error getting status: {e}")
@@ -96,8 +116,9 @@ async def get_markets():
                 "orders_placed": bot.orders_placed.get(market.condition_id, False)
             })
 
-        # Sort by start time
+        # Sort by start time and limit to 10 nearest markets
         markets_data.sort(key=lambda m: m["start_timestamp"])
+        markets_data = markets_data[:10]
 
         return {"markets": markets_data}
 

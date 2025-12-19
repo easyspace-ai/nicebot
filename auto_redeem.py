@@ -1,31 +1,28 @@
-"""Automated redemption service for resolved markets."""
+"""Automatic redemption of winning positions."""
 from web3 import Web3
 from config import Config
-from market_tracker import MarketTracker
 from logger import logger
-from typing import List
+import requests
+from typing import Dict, List
 
 class AutoRedeemer:
-    """Automatically redeem positions from resolved markets."""
+    """Automatically redeems winning positions."""
 
-    def __init__(self, private_key: str):
-        self.private_key = private_key
-        self.tracker = MarketTracker()
+    def __init__(self):
+        self.rpc_url = "https://polygon-rpc.com"
+        self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
 
-        # Initialize Web3
-        self.w3 = Web3(Web3.HTTPProvider('https://polygon-rpc.com'))
         if not self.w3.is_connected():
             raise Exception("Cannot connect to Polygon RPC")
 
-        # Get wallet address
-        account = self.w3.eth.account.from_key(private_key)
-        self.address = account.address
+        private_key = Config.PRIVATE_KEY
+        self.account = self.w3.eth.account.from_key(private_key)
+        self.wallet = self.account.address
 
-        # Contract addresses
+        # Contract setup
         self.CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
         self.USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 
-        # Contract ABI
         self.REDEEM_ABI = [{
             "constant": False,
             "inputs": [
@@ -44,22 +41,78 @@ class AutoRedeemer:
             abi=self.REDEEM_ABI
         )
 
-    def redeem_market(self, market_slug: str, condition_id: str, auto_confirm: bool = False) -> bool:
-        """Redeem positions for a specific market."""
+    def check_and_redeem_all(self) -> int:
+        """
+        Check for redeemable positions and redeem them automatically.
+
+        Returns:
+            Number of positions successfully redeemed
+        """
         try:
-            logger.info(f"Attempting to redeem market: {market_slug}")
+            # Fetch positions from Polymarket API
+            api_url = f"https://data-api.polymarket.com/positions?user={self.wallet}"
+            response = requests.get(api_url, timeout=10)
 
-            # Prepare redemption parameters
+            if response.status_code != 200:
+                logger.warning(f"Failed to fetch positions (status {response.status_code})")
+                return 0
+
+            positions = response.json()
+
+            if not positions:
+                return 0
+
+            # Filter redeemable positions
+            redeemable = [p for p in positions if p.get('redeemable', False)]
+
+            if not redeemable:
+                return 0
+
+            # Group by condition ID
+            by_condition: Dict[str, List] = {}
+            for pos in redeemable:
+                cid = pos['conditionId']
+                if cid not in by_condition:
+                    by_condition[cid] = []
+                by_condition[cid].append(pos)
+
+            total_value = sum(
+                sum(p['currentValue'] for p in positions)
+                for positions in by_condition.values()
+            )
+
+            logger.info(f"Found {len(redeemable)} redeemable positions worth ${total_value:.2f}")
+
+            # Redeem each market
+            success_count = 0
+
+            for cid, positions in by_condition.items():
+                market_title = positions[0]['title']
+                market_value = sum(p['currentValue'] for p in positions)
+
+                logger.info(f"Redeeming: {market_title} (${market_value:.2f})")
+
+                if self._redeem_condition(cid):
+                    success_count += 1
+
+            if success_count > 0:
+                logger.info(f"✓ Redeemed {success_count}/{len(by_condition)} markets")
+
+            return success_count
+
+        except Exception as e:
+            logger.error(f"Error in check_and_redeem_all: {e}", exc_info=True)
+            return 0
+
+    def _redeem_condition(self, condition_id: str) -> bool:
+        """Redeem a single condition."""
+        try:
             collateral_token = Web3.to_checksum_address(self.USDC_ADDRESS)
-            parent_collection_id = b'\x00' * 32  # Null for Polymarket
-            condition_id_bytes = bytes.fromhex(condition_id[2:])  # Remove '0x'
-            index_sets = [1, 2]  # Binary market: both outcomes
+            parent_collection_id = b'\x00' * 32
+            condition_id_bytes = bytes.fromhex(condition_id[2:])
+            index_sets = [1, 2]
 
-            logger.info(f"Condition ID: {condition_id}")
-            logger.info(f"Index sets: {index_sets}")
-
-            # Build transaction
-            nonce = self.w3.eth.get_transaction_count(self.address)
+            nonce = self.w3.eth.get_transaction_count(self.wallet)
             gas_price = self.w3.eth.gas_price
 
             redeem_txn = self.ctf.functions.redeemPositions(
@@ -68,7 +121,7 @@ class AutoRedeemer:
                 condition_id_bytes,
                 index_sets
             ).build_transaction({
-                'from': self.address,
+                'from': self.wallet,
                 'nonce': nonce,
                 'gas': 300000,
                 'gasPrice': gas_price,
@@ -79,67 +132,21 @@ class AutoRedeemer:
             try:
                 estimated_gas = self.w3.eth.estimate_gas(redeem_txn)
                 redeem_txn['gas'] = int(estimated_gas * 1.2)
-                logger.info(f"Estimated gas: {estimated_gas}")
-            except Exception as e:
-                logger.warning(f"Could not estimate gas: {e}")
+            except:
+                pass
 
-            # Sign and send
-            logger.info("Signing and sending redemption transaction...")
-            signed_txn = self.w3.eth.account.sign_transaction(redeem_txn, self.private_key)
+            signed_txn = self.w3.eth.account.sign_transaction(redeem_txn, Config.PRIVATE_KEY)
             tx_hash = self.w3.eth.send_raw_transaction(signed_txn.raw_transaction)
 
-            logger.info(f"Transaction sent: {tx_hash.hex()}")
-            logger.info(f"PolygonScan: https://polygonscan.com/tx/{tx_hash.hex()}")
-
-            # Wait for confirmation
             receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
 
             if receipt.status == 1:
-                logger.info(f"✓ Successfully redeemed {market_slug}")
-                logger.info(f"Gas used: {receipt.gasUsed}")
-
-                # Remove from tracker
-                self.tracker.remove_market(market_slug)
+                logger.info(f"  ✓ Redeemed! TX: {tx_hash.hex()}")
                 return True
             else:
-                logger.error(f"✗ Redemption failed for {market_slug}")
+                logger.error(f"  ✗ Transaction reverted")
                 return False
 
         except Exception as e:
-            logger.error(f"Error redeeming {market_slug}: {e}", exc_info=True)
+            logger.error(f"  ✗ Error: {e}")
             return False
-
-    def redeem_all_pending(self, auto_confirm: bool = True) -> int:
-        """Redeem all pending positions."""
-        unredeemed = self.tracker.get_unredeemed_markets()
-
-        if not unredeemed:
-            logger.info("No markets to redeem")
-            return 0
-
-        logger.info(f"Found {len(unredeemed)} market(s) to redeem")
-
-        redeemed_count = 0
-        for market in unredeemed:
-            logger.info(f"\nRedeeming: {market.question}")
-            success = self.redeem_market(market.market_slug, market.condition_id, auto_confirm)
-            if success:
-                redeemed_count += 1
-
-        logger.info(f"\nRedeemed {redeemed_count}/{len(unredeemed)} markets")
-        return redeemed_count
-
-if __name__ == "__main__":
-    print('='*60)
-    print('Automated Redemption Service')
-    print('='*60)
-
-    redeemer = AutoRedeemer(Config.PRIVATE_KEY)
-    print(f'Wallet: {redeemer.address}\n')
-
-    # Check for pending redemptions
-    count = redeemer.redeem_all_pending(auto_confirm=True)
-
-    print('='*60)
-    print(f'Redeemed {count} market(s)')
-    print('='*60)

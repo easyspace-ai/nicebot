@@ -94,22 +94,39 @@ class OrderManager:
             logger.error(f"Error setting allowances: {e}")
 
     def get_usdc_balance(self) -> float:
-        """Get USDC balance for the wallet."""
+        """Get USDC balance directly from wallet on Polygon blockchain."""
         try:
-            # Use get_balance_allowance which returns balance info
-            result = self.client.get_balance_allowance()
-            # The result contains balance information
-            if isinstance(result, dict) and 'balance' in result:
-                usdc_balance = float(result['balance'])
-            else:
-                # If format is different, try to parse
-                usdc_balance = 0.0
-                logger.warning(f"Unexpected balance format: {result}")
+            from web3 import Web3
 
-            logger.debug(f"USDC balance: ${usdc_balance:.2f}")
+            # Connect to Polygon RPC
+            w3 = Web3(Web3.HTTPProvider("https://polygon-rpc.com"))
+            if not w3.is_connected():
+                logger.error("Cannot connect to Polygon RPC")
+                return 0.0
+
+            # USDC contract on Polygon
+            usdc_address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+            balance_abi = [{
+                "constant": True,
+                "inputs": [{"name": "_owner", "type": "address"}],
+                "name": "balanceOf",
+                "outputs": [{"name": "balance", "type": "uint256"}],
+                "type": "function"
+            }]
+
+            usdc_contract = w3.eth.contract(
+                address=Web3.to_checksum_address(usdc_address),
+                abi=balance_abi
+            )
+
+            # Query balance
+            balance_wei = usdc_contract.functions.balanceOf(self.address).call()
+            usdc_balance = balance_wei / 1e6  # USDC has 6 decimals
+
+            logger.debug(f"USDC balance from wallet: ${usdc_balance:.2f}")
             return usdc_balance
         except Exception as e:
-            logger.error(f"Error getting USDC balance: {e}")
+            logger.error(f"Error getting USDC balance from wallet: {e}", exc_info=True)
             return 0.0
 
     def update_market_prices(self, market: Market) -> Market:
@@ -280,7 +297,9 @@ class OrderManager:
         try:
             # Check balance first
             balance = self.get_usdc_balance()
-            required_balance = Config.ORDER_SIZE_USD * 4  # 4 orders
+            # Only need USDC for BUY orders (2 outcomes × 1 BUY side each)
+            # SELL limit orders would require tokens we don't have yet
+            required_balance = Config.ORDER_SIZE_USD * 2
 
             if balance < required_balance:
                 logger.error(
@@ -335,6 +354,28 @@ class OrderManager:
             logger.info(
                 f"Placed {len(placed_orders)} orders for market {market.market_slug}"
             )
+
+            # VERIFY orders are actually in the orderbook
+            if placed_orders:
+                verified_orders = self.verify_orders_in_orderbook(
+                    market.market_slug,
+                    market.condition_id,
+                    placed_orders
+                )
+
+                # Log final status
+                success_count = sum(1 for o in verified_orders if o.status == OrderStatus.PLACED)
+                failed_count = sum(1 for o in verified_orders if o.status == OrderStatus.FAILED)
+
+                logger.info(f"Order verification complete: {success_count} placed, {failed_count} failed")
+                for order in verified_orders:
+                    status_symbol = "✓" if order.status == OrderStatus.PLACED else "✗"
+                    logger.info(
+                        f"  {status_symbol} {order.side.value} {order.outcome} @ ${order.price:.2f} "
+                        f"x {order.size} shares - {order.status.value}"
+                    )
+
+                placed_orders = verified_orders
 
         except Exception as e:
             logger.error(f"Error placing liquidity orders: {e}", exc_info=True)
@@ -439,6 +480,13 @@ class OrderManager:
         except Exception as e:
             logger.error(f"Error placing order: {e}", exc_info=True)
 
+            # Check if this is a balance/allowance error
+            error_str = str(e).lower()
+            is_balance_error = 'balance' in error_str or 'allowance' in error_str
+
+            if is_balance_error:
+                logger.error("❌ INSUFFICIENT BALANCE OR ALLOWANCE - Cannot place orders!")
+
             # Check if order was actually signed (may still be in orderbook despite API error)
             order_id = None
             if 'signed_order' in locals() and hasattr(signed_order, 'order'):
@@ -446,7 +494,7 @@ class OrderManager:
                     order_id = str(signed_order.order.salt)
                     logger.warning(f"API error but order was signed - may still be in orderbook: {order_id}")
 
-                    # Return as potentially placed (user should verify on Polymarket)
+                    # Return as potentially placed (verification will check orderbook)
                     return OrderRecord(
                         order_id=order_id,
                         market_slug=market.market_slug,
@@ -457,8 +505,8 @@ class OrderManager:
                         price=price,
                         size=size,
                         size_usd=price * size,
-                        status=OrderStatus.PLACED,
-                        error_message=f"API error but order signed: {e}"
+                        status=OrderStatus.PLACED,  # Will be verified by verify_orders_in_orderbook()
+                        error_message=f"API error (will verify): {e}"
                     )
 
             # If we couldn't get signed order, truly failed
@@ -613,6 +661,56 @@ class OrderManager:
 
         return order
 
+    def verify_orders_in_orderbook(self, market_slug: str, condition_id: str, placed_orders: List[OrderRecord]) -> List[OrderRecord]:
+        """
+        Verify which orders actually made it to the orderbook.
+
+        Args:
+            market_slug: Market identifier
+            condition_id: Market condition ID
+            placed_orders: List of OrderRecords from order placement attempt
+
+        Returns:
+            Updated list of OrderRecords with corrected statuses
+        """
+        try:
+            logger.info(f"Verifying orders for {market_slug} in orderbook...")
+
+            # Get all active orders for this market from the orderbook
+            from py_clob_client.client import OpenOrderParams
+            active_orders = self.client.get_orders(OpenOrderParams(market=condition_id))
+
+            # Create a set of active order IDs for quick lookup
+            active_order_ids = {order.get('id') for order in active_orders if order.get('id')}
+
+            logger.info(f"Found {len(active_orders)} active orders in orderbook for market")
+
+            # Update order statuses based on what's actually in orderbook
+            verified_orders = []
+            for order in placed_orders:
+                if order.order_id in active_order_ids:
+                    # Order is confirmed in orderbook
+                    order.status = OrderStatus.PLACED
+                    order.error_message = None
+                    logger.info(f"✓ Verified order {order.order_id[:16]}... in orderbook")
+                else:
+                    # Order NOT in orderbook - mark as failed
+                    order.status = OrderStatus.FAILED
+                    order.size = 0
+                    order.size_usd = 0
+                    if not order.error_message:
+                        order.error_message = "Order not found in orderbook after placement"
+                    logger.warning(f"✗ Order {order.order_id[:16]}... NOT in orderbook - marking as FAILED")
+
+                verified_orders.append(order)
+
+            return verified_orders
+
+        except Exception as e:
+            logger.error(f"Error verifying orders in orderbook: {e}", exc_info=True)
+            # On error, return orders as-is (don't change their status)
+            return placed_orders
+
     def cancel_order(self, order_id: str) -> bool:
         """
         Cancel an order.
@@ -763,3 +861,75 @@ class OrderManager:
         except Exception as e:
             logger.error(f"Error selling position: {e}", exc_info=True)
             return None
+
+    def merge_positions_if_possible(
+        self,
+        market: Market,
+        orders: List[OrderRecord],
+        already_merged_amount: float = 0.0
+    ) -> float:
+        """
+        Merge complementary positions (YES+NO) back to USDC if bot holds both.
+
+        Args:
+            market: Market information
+            orders: List of orders for this market
+            already_merged_amount: Amount already merged for this market
+
+        Returns:
+            Amount merged (0 if none)
+        """
+        try:
+            from ctf_merge import CTFMerger
+            from typing import Dict
+
+            # Check filled amounts for each outcome
+            filled_by_outcome: Dict[str, float] = {"YES": 0.0, "NO": 0.0}
+
+            for order in orders:
+                if order.status in [OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED]:
+                    # Get actual filled size from API
+                    try:
+                        order_details = self.client.get_order(order.order_id)
+                        size_matched = float(order_details.get("size_matched", 0))
+
+                        if size_matched > 0:
+                            outcome_upper = order.outcome.strip().upper()
+                            if outcome_upper in ["YES", "UP"]:
+                                filled_by_outcome["YES"] += size_matched
+                            elif outcome_upper in ["NO", "DOWN"]:
+                                filled_by_outcome["NO"] += size_matched
+                    except Exception as e:
+                        logger.warning(f"Could not get filled size for order {order.order_id}: {e}")
+
+            # Check if we have both YES and NO positions
+            yes_amount = filled_by_outcome.get("YES", 0.0)
+            no_amount = filled_by_outcome.get("NO", 0.0)
+
+            # Calculate how many complete sets we can merge
+            mergeable_amount = min(yes_amount, no_amount)
+            merge_amount = max(0.0, mergeable_amount - already_merged_amount)
+
+            if merge_amount > 0:
+                logger.info(
+                    f"Found {merge_amount} new mergeable sets for {market.market_slug} "
+                    f"(total YES={yes_amount}, NO={no_amount}, merged={already_merged_amount})"
+                )
+
+                # Merge the positions
+                merger = CTFMerger()
+                tx_hash = merger.merge_positions(market.condition_id, merge_amount)
+
+                if tx_hash:
+                    logger.info(f"Merged {merge_amount} sets -> {merge_amount} USDC")
+                    return merge_amount
+                else:
+                    logger.error("Merge failed")
+                    return 0.0
+            else:
+                logger.info(f"No new mergeable positions for {market.market_slug}")
+                return 0.0
+
+        except Exception as e:
+            logger.error(f"Error in merge_positions_if_possible: {e}", exc_info=True)
+            return 0.0
