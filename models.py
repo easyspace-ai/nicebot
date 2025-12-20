@@ -59,12 +59,16 @@ class Market(BaseModel):
 
     @property
     def should_place_orders(self) -> bool:
-        """Check if it's time to place orders (5 minutes before start)."""
+        """Check if it's time to place orders (configurable window before start)."""
         from config import Config
+
         seconds_until_start = self.time_until_start
-        target_seconds = Config.ORDER_PLACEMENT_MINUTES_BEFORE * 60
-        # Place orders between 5-6 minutes before to avoid timing issues
-        return target_seconds <= seconds_until_start <= (target_seconds + 60)
+
+        # Place orders in configurable window (default: 10-20 minutes before market start)
+        min_seconds = Config.ORDER_PLACEMENT_MIN_MINUTES * 60
+        max_seconds = Config.ORDER_PLACEMENT_MAX_MINUTES * 60
+
+        return min_seconds <= seconds_until_start <= max_seconds
 
 
 class OrderRecord(BaseModel):
@@ -82,6 +86,7 @@ class OrderRecord(BaseModel):
     created_at: datetime = Field(default_factory=datetime.now)
     filled_at: Optional[datetime] = None
     error_message: Optional[str] = None
+    strategy: Optional[str] = None  # Strategy name used for this order
 
 
 class BotState(BaseModel):

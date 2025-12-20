@@ -20,8 +20,28 @@ class Config:
     ORDER_SIZE_USD: float = float(os.getenv("ORDER_SIZE_USD", "10.0"))
     SPREAD_OFFSET: float = float(os.getenv("SPREAD_OFFSET", "0.01"))
     CHECK_INTERVAL_SECONDS: int = int(os.getenv("CHECK_INTERVAL_SECONDS", "60"))
-    ORDER_PLACEMENT_MINUTES_BEFORE: int = int(os.getenv("ORDER_PLACEMENT_MINUTES_BEFORE", "5"))
+    ORDER_PLACEMENT_MIN_MINUTES: int = int(os.getenv("ORDER_PLACEMENT_MIN_MINUTES", "10"))
+    ORDER_PLACEMENT_MAX_MINUTES: int = int(os.getenv("ORDER_PLACEMENT_MAX_MINUTES", "20"))
     REDEEM_CHECK_INTERVAL_SECONDS: int = int(os.getenv("REDEEM_CHECK_INTERVAL_SECONDS", "60"))
+
+    # Strategy Configuration
+    STRATEGY_NAME: str = os.getenv("STRATEGY_NAME", "quick_exit_7_5min")
+
+    # Strategy Parameters
+    STRATEGY_PARAMS = {
+        "quick_exit_7_5min": {
+            "exit_timeout_seconds": 450,  # 7.5 minutes after market start
+            "cancel_unfilled": True,
+            "market_sell_filled": True,
+            "enabled": True
+        }
+    }
+
+    @classmethod
+    def get_strategy_config(cls, strategy_name: str = None) -> dict:
+        """Get configuration for a specific strategy."""
+        name = strategy_name or cls.STRATEGY_NAME
+        return cls.STRATEGY_PARAMS.get(name, {})
 
     # API Configuration
     GAMMA_API_BASE_URL: str = os.getenv("GAMMA_API_BASE_URL", "https://gamma-api.polymarket.com")

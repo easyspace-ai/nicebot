@@ -193,7 +193,8 @@ class OrderManager:
         self,
         market: Market,
         price: float = 0.49,
-        size: float = 10.0
+        size: float = 10.0,
+        strategy: Optional[str] = None
     ) -> List[OrderRecord]:
         """
         Place 2 simple test orders: 1 on Yes, 1 on No at fixed price/size.
@@ -202,6 +203,7 @@ class OrderManager:
             market: Market to place orders on
             price: Fixed price for both orders (default: 0.49)
             size: Fixed size in shares (default: 10.0)
+            strategy: Strategy name to attach to orders (optional)
 
         Returns:
             List of order records
@@ -251,7 +253,8 @@ class OrderManager:
                 outcome=yes_outcome,
                 side=OrderSide.BUY,
                 price=price,
-                size=size
+                size=size,
+                strategy=strategy
             )
             if yes_order:
                 placed_orders.append(yes_order)
@@ -265,7 +268,8 @@ class OrderManager:
                 outcome=no_outcome,
                 side=OrderSide.BUY,
                 price=price,
-                size=size
+                size=size,
+                strategy=strategy
             )
             if no_order:
                 placed_orders.append(no_order)
@@ -407,7 +411,8 @@ class OrderManager:
         outcome: Outcome,
         side: OrderSide,
         price: float,
-        size: float
+        size: float,
+        strategy: Optional[str] = None
     ) -> Optional[OrderRecord]:
         """Place a single limit order with fixed price and size."""
         try:
@@ -459,7 +464,8 @@ class OrderManager:
                     size=size,
                     size_usd=size_usd,
                     status=OrderStatus.FAILED,
-                    error_message=f"No order ID in post response"
+                    error_message=f"No order ID in post response",
+                    strategy=strategy
                 )
 
             logger.info(f"Order posted successfully to orderbook: {order_id}")
@@ -474,7 +480,8 @@ class OrderManager:
                 price=price,
                 size=size,
                 size_usd=size_usd,
-                status=OrderStatus.PLACED
+                status=OrderStatus.PLACED,
+                strategy=strategy
             )
 
         except Exception as e:
@@ -506,7 +513,8 @@ class OrderManager:
                         size=size,
                         size_usd=price * size,
                         status=OrderStatus.PLACED,  # Will be verified by verify_orders_in_orderbook()
-                        error_message=f"API error (will verify): {e}"
+                        error_message=f"API error (will verify): {e}",
+                        strategy=strategy
                     )
 
             # If we couldn't get signed order, truly failed
@@ -521,7 +529,8 @@ class OrderManager:
                 size=0,
                 size_usd=price * size,
                 status=OrderStatus.FAILED,
-                error_message=str(e)
+                error_message=str(e),
+                strategy=strategy
             )
 
     def _place_single_order(
@@ -655,6 +664,11 @@ class OrderManager:
             elif status == "CANCELLED":
                 order.status = OrderStatus.CANCELLED
                 logger.info(f"Order {order.order_id} cancelled")
+            elif status in ["OPEN", "PLACED", "LIVE", "ACTIVE"]:
+                # Treat any open status as placed
+                if order.status != OrderStatus.PLACED:
+                    order.status = OrderStatus.PLACED
+                    logger.info(f"Order {order.order_id} still open")
 
         except Exception as e:
             logger.error(f"Error checking order status for {order.order_id}: {e}")
@@ -723,7 +737,7 @@ class OrderManager:
         """
         try:
             logger.info(f"Cancelling order {order_id}")
-            response = self.client.cancel_order(order_id)
+            response = self.client.cancel(order_id)
             logger.info(f"Order cancelled: {order_id}")
             return True
         except Exception as e:
@@ -862,6 +876,55 @@ class OrderManager:
             logger.error(f"Error selling position: {e}", exc_info=True)
             return None
 
+    def _get_token_balances(self, token_ids: list[str]) -> dict[str, float]:
+        """
+        Get actual on-chain ERC1155 token balances.
+
+        Args:
+            token_ids: List of token IDs to check
+
+        Returns:
+            Dict mapping token_id -> balance (in tokens, not wei)
+        """
+        from web3 import Web3
+
+        w3 = Web3(Web3.HTTPProvider(Config.RPC_URL))
+        if not w3.is_connected():
+            logger.warning("Cannot connect to RPC to check balances")
+            return {}
+
+        account = w3.eth.account.from_key(Config.PRIVATE_KEY)
+        wallet = account.address
+
+        CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+
+        ERC1155_ABI = [{
+            "constant": True,
+            "inputs": [
+                {"name": "account", "type": "address"},
+                {"name": "id", "type": "uint256"}
+            ],
+            "name": "balanceOf",
+            "outputs": [{"name": "", "type": "uint256"}],
+            "type": "function"
+        }]
+
+        ctf = w3.eth.contract(
+            address=Web3.to_checksum_address(CTF_ADDRESS),
+            abi=ERC1155_ABI
+        )
+
+        balances = {}
+        for token_id in token_ids:
+            try:
+                balance_wei = ctf.functions.balanceOf(wallet, int(token_id)).call()
+                balances[token_id] = balance_wei / 1_000_000  # 6 decimals
+            except Exception as e:
+                logger.warning(f"Could not check balance for token {token_id}: {e}")
+                balances[token_id] = 0.0
+
+        return balances
+
     def merge_positions_if_possible(
         self,
         market: Market,
@@ -891,6 +954,12 @@ class OrderManager:
                     # Get actual filled size from API
                     try:
                         order_details = self.client.get_order(order.order_id)
+
+                        # Check if API returned None (old/expired order data)
+                        if not order_details:
+                            logger.debug(f"No API data for order {order.order_id} - may be expired")
+                            continue
+
                         size_matched = float(order_details.get("size_matched", 0))
 
                         if size_matched > 0:
@@ -906,28 +975,86 @@ class OrderManager:
             yes_amount = filled_by_outcome.get("YES", 0.0)
             no_amount = filled_by_outcome.get("NO", 0.0)
 
-            # Calculate how many complete sets we can merge
-            mergeable_amount = min(yes_amount, no_amount)
-            merge_amount = max(0.0, mergeable_amount - already_merged_amount)
+            # Get token IDs for YES and NO outcomes
+            yes_token_id = None
+            no_token_id = None
 
-            if merge_amount > 0:
-                logger.info(
-                    f"Found {merge_amount} new mergeable sets for {market.market_slug} "
-                    f"(total YES={yes_amount}, NO={no_amount}, merged={already_merged_amount})"
-                )
+            # First, try to get token IDs from order outcomes
+            for order in orders:
+                outcome_upper = order.outcome.strip().upper()
+                if outcome_upper in ["YES", "UP"] and yes_token_id is None:
+                    yes_token_id = order.token_id
+                elif outcome_upper in ["NO", "DOWN"] and no_token_id is None:
+                    no_token_id = order.token_id
 
-                # Merge the positions
-                merger = CTFMerger()
-                tx_hash = merger.merge_positions(market.condition_id, merge_amount)
+            # If we couldn't get token IDs from orders (e.g., recovered orders with "Unknown" outcome),
+            # try to get them from market outcomes
+            if (not yes_token_id or not no_token_id) and market.outcomes:
+                for outcome in market.outcomes:
+                    outcome_upper = outcome.outcome.strip().upper()
+                    if outcome_upper in ["YES", "UP"] and yes_token_id is None:
+                        yes_token_id = outcome.token_id
+                    elif outcome_upper in ["NO", "DOWN"] and no_token_id is None:
+                        no_token_id = outcome.token_id
 
-                if tx_hash:
-                    logger.info(f"Merged {merge_amount} sets -> {merge_amount} USDC")
-                    return merge_amount
+            if not yes_token_id or not no_token_id:
+                # Downgrade to debug - this is expected for old orphaned orders
+                logger.debug(f"Cannot merge - missing token IDs for {market.market_slug}")
+                return 0.0
+
+            # Check actual on-chain balances
+            actual_balances = self._get_token_balances([yes_token_id, no_token_id])
+            actual_yes = actual_balances.get(yes_token_id, 0.0)
+            actual_no = actual_balances.get(no_token_id, 0.0)
+
+            logger.info(
+                f"Position check for {market.market_slug}: "
+                f"API says YES={yes_amount}, NO={no_amount} | "
+                f"Wallet has YES={actual_yes}, NO={actual_no}"
+            )
+
+            # Use wallet balance as source of truth
+            # API data might be stale or incorrect, wallet balance is definitive
+            yes_amount = actual_yes
+            no_amount = actual_no
+
+            if yes_amount <= 0 or no_amount <= 0:
+                logger.info(f"No actual tokens to merge for {market.market_slug}")
+                return 0.0
+
+            # Only merge if YES and NO amounts are equal (within tolerance)
+            MERGE_TOLERANCE = 0.001  # Allow small floating point differences
+
+            if abs(yes_amount - no_amount) <= MERGE_TOLERANCE:
+                # Amounts are equal, proceed with merge
+                mergeable_amount = yes_amount
+                merge_amount = max(0.0, mergeable_amount - already_merged_amount)
+
+                if merge_amount > 0:
+                    logger.info(
+                        f"Found {merge_amount} new mergeable sets for {market.market_slug} "
+                        f"(total YES={yes_amount}, NO={no_amount}, merged={already_merged_amount})"
+                    )
+
+                    # Merge the positions
+                    merger = CTFMerger()
+                    tx_hash = merger.merge_positions(market.condition_id, merge_amount)
+
+                    if tx_hash:
+                        logger.info(f"Merged {merge_amount} sets -> {merge_amount} USDC")
+                        return merge_amount
+                    else:
+                        logger.error("Merge failed")
+                        return 0.0
                 else:
-                    logger.error("Merge failed")
+                    logger.info(f"No new mergeable positions for {market.market_slug}")
                     return 0.0
             else:
-                logger.info(f"No new mergeable positions for {market.market_slug}")
+                # Amounts are not equal, skip merge
+                logger.debug(
+                    f"Skipping merge for {market.market_slug} - unequal positions "
+                    f"(YES={yes_amount}, NO={no_amount}, diff={abs(yes_amount - no_amount):.4f})"
+                )
                 return 0.0
 
         except Exception as e:

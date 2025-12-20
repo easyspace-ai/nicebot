@@ -5,6 +5,25 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Polymarket Limit Order Bot</title>
     <style>
+        /* Palette and typography */
+        :root {
+            --bg: #05070d;
+            --panel: rgba(18, 24, 40, 0.72);
+            --panel-strong: rgba(14, 18, 30, 0.9);
+            --border: rgba(99, 123, 169, 0.25);
+            --glow: 0 10px 40px rgba(0, 255, 209, 0.08), 0 0 60px rgba(90, 178, 255, 0.12);
+            --text: #eef2ff;
+            --muted: #9fb0d1;
+            --accent: #4af1c8;
+            --accent-2: #7c8bff;
+            --danger: #ff6b9a;
+            --warning: #f2c94c;
+            --success: #4af1c8;
+            --badge-bg: rgba(124, 139, 255, 0.1);
+        }
+
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
         * {
             margin: 0;
             padding: 0;
@@ -12,10 +31,12 @@
         }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            background: #0f0f1e;
-            color: #e0e0e0;
-            padding: 20px;
+            font-family: "Inter", "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: radial-gradient(circle at 10% 10%, rgba(74, 241, 200, 0.08), transparent 25%),
+                        radial-gradient(circle at 85% 0%, rgba(124, 139, 255, 0.12), transparent 30%),
+                        linear-gradient(135deg, #05070d 0%, #070b14 50%, #05070d 100%);
+            color: var(--text);
+            padding: 24px;
         }
 
         .container {
@@ -23,237 +44,381 @@
             margin: 0 auto;
         }
 
+        header {
+            margin-bottom: 20px;
+        }
+
         h1 {
-            color: #fff;
-            margin-bottom: 10px;
-            font-size: 2em;
+            font-size: 2rem;
+            letter-spacing: -0.02em;
         }
 
         .subtitle {
-            color: #888;
-            margin-bottom: 30px;
+            color: var(--muted);
+            margin-top: 6px;
         }
 
-        .status-bar {
-            background: #1a1a2e;
-            border-radius: 8px;
-            padding: 20px;
-            margin-bottom: 20px;
+        .controls {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-top: 14px;
+        }
+
+        .btn {
+            background: var(--panel-strong);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 10px 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.18s ease;
+            box-shadow: var(--glow);
+        }
+
+        .btn.accent {
+            background: linear-gradient(120deg, var(--accent), var(--accent-2));
+            color: #05070d;
+            border: none;
+            box-shadow: 0 10px 30px rgba(74, 241, 200, 0.25);
+        }
+
+        .btn:hover {
+            transform: translateY(-2px) scale(1.01);
+            border-color: var(--accent);
+        }
+
+        .grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 20px;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 12px;
+            margin-bottom: 16px;
         }
 
-        .status-item {
-            text-align: center;
+        .card {
+            position: relative;
+            background: var(--panel);
+            border-radius: 14px;
+            padding: 16px;
+            overflow: hidden;
+            backdrop-filter: blur(16px);
+            box-shadow: var(--glow);
         }
 
-        .status-label {
-            color: #888;
-            font-size: 0.9em;
-            margin-bottom: 5px;
+        .card::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            border-radius: 14px;
+            padding: 1px;
+            background: linear-gradient(135deg, rgba(74, 241, 200, 0.35), rgba(124, 139, 255, 0.35));
+            mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+            -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+            mask-composite: exclude;
+            -webkit-mask-composite: destination-out;
+            pointer-events: none;
         }
 
-        .status-value {
-            color: #fff;
-            font-size: 1.5em;
-            font-weight: bold;
+        .card-title {
+            font-size: 0.9rem;
+            color: var(--muted);
+            margin-bottom: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
         }
 
-        .status-value.running {
-            color: #4CAF50;
+        .metric {
+            font-size: 1.7rem;
+            font-weight: 700;
         }
 
-        .status-value.error {
-            color: #f44336;
+        .metric.badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 12px;
+            border-radius: 10px;
+            font-size: 1rem;
+            background: radial-gradient(circle at 10% 10%, rgba(74, 241, 200, 0.2), rgba(124, 139, 255, 0.15));
+            border: 1px solid var(--border);
+            box-shadow: var(--glow);
         }
+
+        .badge-chip {
+            padding: 4px 10px;
+            border-radius: 999px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            border: 1px solid var(--border);
+            background: rgba(255, 255, 255, 0.04);
+            box-shadow: var(--glow);
+        }
+
+        .badge-chip.success { background: rgba(74, 241, 200, 0.16); color: var(--success); }
+        .badge-chip.warning { background: rgba(242, 201, 76, 0.18); color: var(--warning); }
+        .badge-chip.danger { background: rgba(255, 107, 154, 0.18); color: var(--danger); }
+        .badge-chip.neutral { background: rgba(124, 139, 255, 0.1); color: var(--text); }
 
         .section {
-            background: #1a1a2e;
-            border-radius: 8px;
-            padding: 20px;
-            margin-bottom: 20px;
+            background: var(--panel-strong);
+            border-radius: 14px;
+            padding: 18px;
+            margin-bottom: 16px;
+            box-shadow: var(--glow);
+            border: 1px solid var(--border);
+            backdrop-filter: blur(20px);
         }
 
         .section-title {
-            color: #fff;
-            font-size: 1.3em;
-            margin-bottom: 15px;
-            border-bottom: 2px solid #2a2a3e;
-            padding-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 1.05rem;
+            font-weight: 600;
+            margin-bottom: 12px;
+        }
+
+        .table-wrap {
+            overflow-x: auto;
+            border-radius: 12px;
+            border: 1px solid var(--border);
+            background: rgba(255, 255, 255, 0.02);
+            box-shadow: var(--glow);
         }
 
         table {
             width: 100%;
             border-collapse: collapse;
+            min-width: 680px;
+        }
+
+        th, td {
+            padding: 12px 12px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
         }
 
         th {
-            background: #2a2a3e;
-            color: #fff;
-            padding: 12px;
-            text-align: left;
+            position: sticky;
+            top: 0;
+            background: var(--panel-strong);
+            z-index: 1;
+            font-size: 0.9rem;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        tr:hover td {
+            background: rgba(124, 139, 255, 0.06);
+        }
+
+        a.market-link {
+            color: var(--accent-2);
+            text-decoration: none;
             font-weight: 600;
-        }
-
-        td {
-            padding: 12px;
-            border-bottom: 1px solid #2a2a3e;
-        }
-
-        tr:hover {
-            background: #252540;
-        }
-
-        .badge {
-            display: inline-block;
-            padding: 4px 12px;
-            border-radius: 12px;
-            font-size: 0.85em;
-            font-weight: 600;
-        }
-
-        .badge.placed {
-            background: #4CAF50;
-            color: white;
-        }
-
-        .badge.filled {
-            background: #2196F3;
-            color: white;
-        }
-
-        .badge.cancelled {
-            background: #757575;
-            color: white;
-        }
-
-        .badge.failed {
-            background: #f44336;
-            color: white;
-        }
-
-        .badge.buy {
-            background: #4CAF50;
-            color: white;
-        }
-
-        .badge.sell {
-            background: #f44336;
-            color: white;
         }
 
         .countdown {
-            color: #FFC107;
-            font-weight: bold;
+            font-weight: 700;
+            color: var(--accent-2);
+            letter-spacing: 0.04em;
         }
 
         .countdown.soon {
-            color: #f44336;
+            color: var(--danger);
         }
 
         .logs {
-            background: #0a0a1a;
-            border-radius: 4px;
-            padding: 15px;
-            max-height: 400px;
+            background: var(--panel-strong);
+            border-radius: 12px;
+            padding: 14px;
+            max-height: 360px;
             overflow-y: auto;
-            font-family: 'Courier New', monospace;
-            font-size: 0.85em;
+            font-family: "DM Mono", "SFMono-Regular", Consolas, monospace;
+            font-size: 0.9rem;
+            border: 1px solid var(--border);
+            box-shadow: var(--glow);
         }
 
-        .log-line {
-            margin-bottom: 5px;
-            color: #b0b0b0;
+        .log-line { margin-bottom: 6px; color: #cdd6e8; }
+        .log-line.error { color: var(--danger); }
+        .log-line.warning { color: var(--warning); }
+        .log-line.info { color: var(--accent-2); }
+
+        .loop-bar {
+            position: relative;
+            height: 12px;
+            background: rgba(255, 255, 255, 0.06);
+            border-radius: 999px;
+            overflow: hidden;
+            border: 1px solid var(--border);
+            margin-top: 10px;
         }
 
-        .log-line.error {
-            color: #f44336;
-        }
-
-        .log-line.warning {
-            color: #FFC107;
-        }
-
-        .log-line.info {
-            color: #2196F3;
+        .loop-fill {
+            position: absolute;
+            top: 0;
+            left: 0;
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, var(--accent), var(--accent-2));
+            box-shadow: 0 0 20px rgba(74, 241, 200, 0.35);
+            transition: width 0.3s ease;
         }
 
         .empty-state {
             text-align: center;
-            color: #666;
-            padding: 40px;
+            color: var(--muted);
+            padding: 24px;
+            font-weight: 600;
         }
 
-        .refresh-info {
-            color: #666;
-            font-size: 0.9em;
-            text-align: center;
-            margin-top: 10px;
+        .banner {
+            border-radius: 12px;
+            padding: 14px 16px;
+            margin: 10px 0 18px;
+            border: 1px solid var(--border);
+            background: rgba(255, 255, 255, 0.03);
+            box-shadow: var(--glow);
         }
 
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
+        .banner.warning { background: rgba(242, 201, 76, 0.14); border-color: rgba(242, 201, 76, 0.4); color: var(--warning); }
+        .banner.success { background: rgba(74, 241, 200, 0.12); border-color: rgba(74, 241, 200, 0.4); color: var(--success); }
+
+        @media (max-width: 900px) {
+            table { min-width: 0; }
+            th, td { font-size: 0.9rem; }
+            .grid { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
         }
 
-        .loading {
-            animation: pulse 1.5s ease-in-out infinite;
+        /* Mobile stacking for tables */
+        @media (max-width: 720px) {
+            .table-wrap table,
+            .table-wrap thead,
+            .table-wrap tbody,
+            .table-wrap th,
+            .table-wrap td,
+            .table-wrap tr {
+                display: block;
+                width: 100%;
+            }
+            .table-wrap thead {
+                display: none;
+            }
+            .table-wrap tr {
+                border: 1px solid var(--border);
+                border-radius: 10px;
+                padding: 10px 12px;
+                margin-bottom: 12px;
+                background: var(--card-strong);
+            }
+            .table-wrap td {
+                border: none;
+                padding: 6px 0;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                gap: 10px;
+            }
+            .table-wrap td::before {
+                content: attr(data-label);
+                color: var(--muted);
+                font-size: 0.85rem;
+                font-weight: 600;
+            }
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🤖 Polymarket Limit Order Bot</h1>
-        <p class="subtitle">Automated liquidity provision for BTC 15-minute markets</p>
+        <header>
+            <h1>Polymarket Limit Order Bot</h1>
+            <p class="subtitle">Automated liquidity provision for BTC 15-minute markets</p>
+            <div class="controls">
+                <button class="btn accent" onclick="updateAll()">Refresh now</button>
+                <button class="btn" onclick="copySnapshot()">Copy snapshot</button>
+            </div>
+        </header>
 
-        <div class="status-bar">
-            <div class="status-item">
-                <div class="status-label">Status</div>
-                <div class="status-value running" id="status">●</div>
+        <div class="grid">
+            <div class="card">
+                <div class="card-title">Status</div>
+                <div class="metric badge" id="status">Loading...</div>
             </div>
-            <div class="status-item">
-                <div class="status-label">USDC Balance</div>
-                <div class="status-value" id="balance">$0.00</div>
+            <div class="card">
+                <div class="card-title">USDC Balance</div>
+                <div class="metric" id="balance">$0.00</div>
             </div>
-            <div class="status-item">
-                <div class="status-label">Active Markets</div>
-                <div class="status-value" id="markets-count">0</div>
+            <div class="card">
+                <div class="card-title">Active Markets</div>
+                <div class="metric" id="markets-count">0</div>
             </div>
-            <div class="status-item">
-                <div class="status-label">Pending Orders</div>
-                <div class="status-value" id="orders-count">0</div>
+            <div class="card">
+                <div class="card-title">Pending Orders</div>
+                <div class="metric" id="orders-count">0</div>
             </div>
-            <div class="status-item">
-                <div class="status-label">Last Check</div>
-                <div class="status-value" id="last-check" style="font-size: 1em;">Never</div>
+            <div class="card">
+                <div class="card-title">Last Check</div>
+                <div class="metric" id="last-check">Never</div>
+            </div>
+            <div class="card">
+                <div class="card-title">Bot Loop</div>
+                <div class="metric" id="loop-next">--</div>
+                <div class="subtitle" id="loop-eta">Next run in --</div>
+                <div class="loop-bar">
+                    <div class="loop-fill" id="loop-progress"></div>
+                </div>
             </div>
         </div>
 
-        <!-- Balance Warning Banner -->
-        <div id="balance-warning" style="display:none; background-color: #fff3cd; border: 1px solid #ffc107; border-radius: 8px; padding: 15px; margin: 20px 0; color: #856404;">
-            <strong>⚠️ Low Balance Warning</strong>
-            <div id="balance-warning-message" style="margin-top: 8px;"></div>
+        <div id="balance-warning" class="banner warning" style="display:none;">
+            <strong>Low Balance</strong>
+            <div id="balance-warning-message" style="margin-top: 6px;"></div>
+        </div>
+
+        <div class="section">
+            <div class="section-title">Trade Statistics</div>
+            <div class="grid">
+                <div class="card">
+                    <div class="card-title">Markets Participated</div>
+                    <div class="metric" id="total-markets">0</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Successful Trades</div>
+                    <div class="metric" id="successful-trades">0</div>
+                    <div class="badge-chip success">Both orders filled</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Unsuccessful Trades</div>
+                    <div class="metric" id="unsuccessful-trades">0</div>
+                    <div class="badge-chip danger">None or one fill</div>
+                </div>
+            </div>
         </div>
 
         <div class="section">
             <div class="section-title">Upcoming BTC 15-Minute Markets</div>
             <div id="markets-content">
-                <div class="empty-state loading">Loading markets...</div>
+                <div class="empty-state">Loading markets...</div>
             </div>
         </div>
 
         <div class="section">
             <div class="section-title">Open Orders</div>
             <div id="pending-orders-content">
-                <div class="empty-state loading">Loading orders...</div>
+                <div class="empty-state">Loading orders...</div>
             </div>
         </div>
 
         <div class="section">
             <div class="section-title">Order History (Last 100)</div>
             <div id="recent-orders-content">
-                <div class="empty-state loading">Loading orders...</div>
+                <div class="empty-state">Loading orders...</div>
             </div>
         </div>
 
@@ -264,7 +429,7 @@
             </div>
         </div>
 
-        <div class="refresh-info">Auto-refreshing every 5 seconds</div>
+        <div class="subtitle" style="text-align:center; margin-top: 8px;">Auto-refreshing every 5 seconds</div>
     </div>
 
     <script>
@@ -280,28 +445,110 @@
             return date.toLocaleString();
         }
 
+        function setStatusBadge(isRunning) {
+            const el = document.getElementById('status');
+            el.className = 'metric badge';
+            if (isRunning) {
+                el.textContent = 'Running';
+                el.classList.add('badge-chip', 'success');
+            } else {
+                el.textContent = 'Stopped';
+                el.classList.add('badge-chip', 'danger');
+            }
+        }
+
+        async function copySnapshot() {
+            try {
+                const [statusRes, ordersRes, marketsRes, logsRes] = await Promise.all([
+                    fetch('/api/status').then(r => r.json()),
+                    fetch('/api/orders').then(r => r.json()),
+                    fetch('/api/markets').then(r => r.json()),
+                    fetch('/api/logs').then(r => r.json())
+                ]);
+
+                const snapshot = {
+                    status: statusRes,
+                    pending_orders: ordersRes.pending_orders?.length || 0,
+                    recent_orders: ordersRes.recent_orders?.length || 0,
+                    markets: marketsRes.markets?.length || 0,
+                    logs_tail: (logsRes.logs || []).slice(-50)
+                };
+
+                await navigator.clipboard.writeText(JSON.stringify(snapshot, null, 2));
+                alert('Snapshot copied to clipboard');
+            } catch (e) {
+                console.error('Snapshot copy failed', e);
+                alert('Could not copy snapshot');
+            }
+        }
+
+        function formatCountdown(startIso) {
+            if (!startIso) return 'N/A';
+            const target = new Date(startIso).getTime();
+            const now = Date.now();
+            const diffMs = target - now;
+            const negative = diffMs < 0;
+            const abs = Math.abs(diffMs);
+            const minutes = Math.floor(abs / 60000);
+            const seconds = Math.floor((abs % 60000) / 1000);
+            const pad = (n) => n.toString().padStart(2, '0');
+            return `${negative ? '-' : ''}${pad(minutes)}:${pad(seconds)}`;
+        }
+
+        function refreshCountdowns() {
+            document.querySelectorAll('.countdown-live').forEach(el => {
+                const startIso = el.dataset.start;
+                const formatted = formatCountdown(startIso);
+                el.textContent = formatted;
+                const target = new Date(startIso).getTime();
+                const diffMs = target - Date.now();
+                if (diffMs <= 10 * 60 * 1000) {
+                    el.classList.add('soon');
+                } else {
+                    el.classList.remove('soon');
+                }
+            });
+        }
+
+        let countdownTimer = null;
+        let loopMeta = { last: null, next: null, interval: null };
+        let isBotRunning = false;
+        function ensureCountdownTimer() {
+            if (countdownTimer) return;
+            countdownTimer = setInterval(() => {
+                refreshCountdowns();
+                refreshLoopProgress();
+            }, 1000);
+        }
+
         async function updateStatus() {
             try {
                 const response = await fetch('/api/status');
                 const data = await response.json();
 
-                document.getElementById('status').textContent = data.is_running ? '● Running' : '○ Stopped';
+                isBotRunning = data.is_running;
+                setStatusBadge(data.is_running);
                 document.getElementById('balance').textContent = `$${data.usdc_balance.toFixed(2)}`;
                 document.getElementById('markets-count').textContent = data.active_markets_count;
                 document.getElementById('orders-count').textContent = data.pending_orders_count;
                 document.getElementById('last-check').textContent = data.last_check ? formatTime(data.last_check) : 'Never';
 
-                // Handle balance warning
+                // Loop progress data
+                loopMeta = {
+                    last: data.last_check,
+                    next: data.next_check,
+                    interval: data.check_interval_seconds
+                };
+                updateLoopUi();
+
                 const warningDiv = document.getElementById('balance-warning');
                 const warningMessage = document.getElementById('balance-warning-message');
 
                 if (data.balance_warning) {
                     let message = `Current balance ($${data.usdc_balance.toFixed(2)}) is below the minimum needed ($${data.min_balance_needed.toFixed(2)}) to place orders.`;
-
                     if (data.balance_error_count > 0) {
                         message += `<br><strong>${data.balance_error_count}</strong> order(s) failed due to insufficient balance or allowance.`;
                     }
-
                     warningMessage.innerHTML = message;
                     warningDiv.style.display = 'block';
                 } else {
@@ -316,19 +563,22 @@
             try {
                 const response = await fetch('/api/markets');
                 const data = await response.json();
-
                 const container = document.getElementById('markets-content');
 
-                if (data.markets.length === 0) {
-                    container.innerHTML = '<div class="empty-state">No upcoming markets found</div>';
+                if (!data.markets || data.markets.length === 0) {
+                    container.innerHTML = '<div class="empty-state">No upcoming markets found. The bot will continue polling every 60s.</div>';
                     return;
                 }
 
-                let html = '<table><thead><tr><th>Market</th><th>Starts</th><th>Countdown</th><th>Outcomes</th><th>Status</th></tr></thead><tbody>';
+                let html = '<div class="table-wrap"><table><thead><tr><th>Market</th><th>Starts</th><th>Countdown</th><th>Outcomes</th><th>Status</th></tr></thead><tbody>';
 
                 for (const market of data.markets) {
-                    const countdownClass = market.time_until_start < 600 ? 'countdown soon' : 'countdown';
-                    const statusBadge = market.orders_placed ? '<span class="badge placed">Orders Placed</span>' : '<span class="badge" style="background: #666;">Waiting</span>';
+                    const startIso = market.start_datetime;
+                    const countdownText = startIso ? formatCountdown(startIso) : market.time_until_start_formatted;
+                    const countdownClass = 'countdown countdown-live';
+                    const statusBadge = market.orders_placed
+                        ? '<span class="badge-chip success">Orders placed</span>'
+                        : '<span class="badge-chip neutral">Waiting</span>';
 
                     let outcomesHtml = '';
                     for (const outcome of market.outcomes) {
@@ -338,21 +588,61 @@
                     }
 
                     html += `
-                        <tr>
-                            <td><strong>${market.question}</strong><br><small style="color: #666;">${market.market_slug}</small></td>
-                            <td>${formatDateTime(market.start_datetime)}</td>
-                            <td><span class="${countdownClass}">${market.time_until_start_formatted}</span></td>
-                            <td>${outcomesHtml || 'Loading...'}</td>
-                            <td>${statusBadge}</td>
+                            <tr>
+                            <td data-label="Market">
+                                <a class="market-link" href="https://polymarket.com/market/${market.market_slug}"
+                                   target="_blank" rel="noopener noreferrer">
+                                    ${market.question}
+                                </a>
+                                <div class="subtitle" style="margin-top: 4px;">${market.market_slug}</div>
+                            </td>
+                            <td data-label="Starts">${formatDateTime(market.start_datetime)}</td>
+                            <td data-label="Countdown"><span class="${countdownClass}" data-start="${startIso || ''}">${countdownText}</span></td>
+                            <td data-label="Outcomes">${outcomesHtml || 'Loading orderbook...'}</td>
+                            <td data-label="Status">${statusBadge}</td>
                         </tr>
                     `;
                 }
 
-                html += '</tbody></table>';
+                html += '</tbody></table></div>';
                 container.innerHTML = html;
             } catch (error) {
                 console.error('Error updating markets:', error);
             }
+        }
+
+        function groupOrders(orders) {
+            const grouped = {};
+            for (const order of orders) {
+                const key = [
+                    order.market_slug,
+                    order.side,
+                    order.price,
+                    order.size,
+                    order.size_usd
+                ].join('|');
+
+                if (!grouped[key]) {
+                    grouped[key] = {
+                        ...order,
+                        outcomes: [order.outcome],
+                        statuses: [order.status],
+                        count: 1,
+                        created_at: order.created_at
+                    };
+                } else {
+                    grouped[key].outcomes.push(order.outcome);
+                    grouped[key].statuses.push(order.status);
+                    grouped[key].count += 1;
+                    // Keep earliest timestamp for display
+                    if (order.created_at && grouped[key].created_at) {
+                        grouped[key].created_at = new Date(order.created_at) < new Date(grouped[key].created_at)
+                            ? order.created_at
+                            : grouped[key].created_at;
+                    }
+                }
+            }
+            return Object.values(grouped);
         }
 
         async function updateOrders() {
@@ -360,59 +650,83 @@
                 const response = await fetch('/api/orders');
                 const data = await response.json();
 
-                // Pending orders
                 const pendingContainer = document.getElementById('pending-orders-content');
-                if (data.pending_orders.length === 0) {
+                if (!data.pending_orders || data.pending_orders.length === 0) {
                     pendingContainer.innerHTML = '<div class="empty-state">No open orders</div>';
                 } else {
-                    let html = '<table><thead><tr><th>Market</th><th>Outcome</th><th>Side</th><th>Price</th><th>Size</th><th>Status</th><th>Created</th></tr></thead><tbody>';
-
+                    let html = '<div class="table-wrap"><table><thead><tr><th>Market</th><th>Outcome</th><th>Side</th><th>Price</th><th>Size</th><th>Status</th><th>Strategy</th><th>Created</th></tr></thead><tbody>';
                     for (const order of data.pending_orders) {
-                        const sideBadge = `<span class="badge ${order.side.toLowerCase()}">${order.side}</span>`;
-                        const statusBadge = `<span class="badge ${order.status.toLowerCase()}">${order.status}</span>`;
+                        const sideBadge = `<span class="badge-chip ${order.side.toLowerCase() === 'buy' ? 'success' : 'danger'}">${order.side}</span>`;
+                        const statusBadge = `<span class="badge-chip ${
+                            order.status.toLowerCase() === 'placed' ? 'neutral'
+                            : order.status.toLowerCase() === 'filled' ? 'success'
+                            : order.status.toLowerCase() === 'cancelled' ? 'warning'
+                            : 'danger'
+                        }">${order.status}</span>`;
+                        const strategyLabel = order.strategy || 'None';
+                        const strategyBadge = order.strategy
+                            ? `<span class="badge-chip neutral">${strategyLabel}</span>`
+                            : '<span class="badge-chip" style="opacity: 0.5;">N/A</span>';
 
                         html += `
                             <tr>
-                                <td>${order.market_slug}</td>
-                                <td>${order.outcome}</td>
-                                <td>${sideBadge}</td>
-                                <td>$${order.price.toFixed(3)}</td>
-                                <td>${order.size.toFixed(2)} ($${order.size_usd.toFixed(2)})</td>
-                                <td>${statusBadge}</td>
-                                <td>${formatTime(order.created_at)}</td>
+                                <td data-label="Market">${order.market_slug}</td>
+                                <td data-label="Outcome">${order.outcome}</td>
+                                <td data-label="Side">${sideBadge}</td>
+                                <td data-label="Price">$${order.price.toFixed(3)}</td>
+                                <td data-label="Size">${order.size.toFixed(2)} ($${order.size_usd.toFixed(2)})</td>
+                                <td data-label="Status">${statusBadge}</td>
+                                <td data-label="Strategy">${strategyBadge}</td>
+                                <td data-label="Created">${formatTime(order.created_at)}</td>
                             </tr>
                         `;
                     }
-
-                    html += '</tbody></table>';
+                    html += '</tbody></table></div>';
                     pendingContainer.innerHTML = html;
                 }
 
-                // Recent orders
                 const recentContainer = document.getElementById('recent-orders-content');
-                if (data.recent_orders.length === 0) {
+                const groupedRecent = data.recent_orders ? groupOrders(data.recent_orders) : [];
+
+                if (!groupedRecent || groupedRecent.length === 0) {
                     recentContainer.innerHTML = '<div class="empty-state">No recent orders</div>';
                 } else {
-                    let html = '<table><thead><tr><th>Market</th><th>Outcome</th><th>Side</th><th>Price</th><th>Size</th><th>Status</th><th>Created</th></tr></thead><tbody>';
-
-                    for (const order of data.recent_orders) {
-                        const sideBadge = `<span class="badge ${order.side.toLowerCase()}">${order.side}</span>`;
-                        const statusBadge = `<span class="badge ${order.status.toLowerCase()}">${order.status}</span>`;
+                    let html = '<div class="table-wrap"><table><thead><tr><th>Market</th><th>Outcome</th><th>Side</th><th>Price</th><th>Size</th><th>Status</th><th>Strategy</th><th>Created</th></tr></thead><tbody>';
+                    for (const order of groupedRecent) {
+                        const sideBadge = `<span class="badge-chip ${order.side.toLowerCase() === 'buy' ? 'success' : 'danger'}">${order.side}</span>`;
+                        const statusSet = Array.from(new Set(order.statuses || [order.status]));
+                        const statusLabel = statusSet.join(', ');
+                        const statusClass = statusSet.length === 1
+                            ? (statusSet[0] || '').toLowerCase()
+                            : 'mixed';
+                        const statusBadge = `<span class="badge-chip ${
+                            statusClass === 'placed' ? 'neutral'
+                            : statusClass === 'filled' ? 'success'
+                            : statusClass === 'cancelled' ? 'warning'
+                            : statusClass === 'mixed' ? 'neutral'
+                            : 'danger'
+                        }">${statusLabel}</span>`;
+                        const outcomesLabel = order.outcomes ? order.outcomes.join(', ') : order.outcome;
+                        const multiplier = order.count && order.count > 1 ? ` x${order.count}` : '';
+                        const strategyLabel = order.strategy || 'None';
+                        const strategyBadge = order.strategy
+                            ? `<span class="badge-chip neutral">${strategyLabel}</span>`
+                            : '<span class="badge-chip" style="opacity: 0.5;">N/A</span>';
 
                         html += `
                             <tr>
-                                <td>${order.market_slug}</td>
-                                <td>${order.outcome}</td>
-                                <td>${sideBadge}</td>
-                                <td>$${order.price.toFixed(3)}</td>
-                                <td>${order.size.toFixed(2)} ($${order.size_usd.toFixed(2)})</td>
-                                <td>${statusBadge}</td>
-                                <td>${formatTime(order.created_at)}</td>
+                                <td data-label="Market">${order.market_slug}</td>
+                                <td data-label="Outcome">${outcomesLabel}</td>
+                                <td data-label="Side">${sideBadge}</td>
+                                <td data-label="Price">$${order.price.toFixed(3)}</td>
+                                <td data-label="Size">${order.size.toFixed(2)} ($${order.size_usd.toFixed(2)})${multiplier}</td>
+                                <td data-label="Status">${statusBadge}</td>
+                                <td data-label="Strategy">${strategyBadge}</td>
+                                <td data-label="Created">${formatTime(order.created_at)}</td>
                             </tr>
                         `;
                     }
-
-                    html += '</tbody></table>';
+                    html += '</tbody></table></div>';
                     recentContainer.innerHTML = html;
                 }
             } catch (error) {
@@ -424,39 +738,99 @@
             try {
                 const response = await fetch('/api/logs');
                 const data = await response.json();
-
                 const container = document.getElementById('logs-content');
-                if (data.logs && data.logs.length > 0) {
-                    let html = '';
-                    for (const line of data.logs.reverse()) {
-                        let className = 'log-line';
-                        if (line.includes('ERROR')) className += ' error';
-                        else if (line.includes('WARNING')) className += ' warning';
-                        else if (line.includes('INFO')) className += ' info';
+                const lines = (data.logs || []).slice(-200);
 
-                        html += `<div class="${className}">${line}</div>`;
-                    }
-                    container.innerHTML = html;
-                    container.scrollTop = container.scrollHeight;
+                if (lines.length === 0) {
+                    container.innerHTML = '<div class="empty-state">No logs yet</div>';
+                    return;
                 }
+
+                let html = '';
+                for (const line of lines.reverse()) {
+                    let className = 'log-line';
+                    if (line.includes('ERROR')) className += ' error';
+                    else if (line.includes('WARNING')) className += ' warning';
+                    else if (line.includes('INFO')) className += ' info';
+                    html += `<div class="${className}">${line}</div>`;
+                }
+                container.innerHTML = html;
+                container.scrollTop = container.scrollHeight;
             } catch (error) {
                 console.error('Error updating logs:', error);
+            }
+        }
+
+        async function updateStatistics() {
+            try {
+                const response = await fetch('/api/statistics');
+                const stats = await response.json();
+                document.getElementById('total-markets').textContent = stats.total_markets;
+                document.getElementById('successful-trades').textContent = stats.successful_trades;
+                document.getElementById('unsuccessful-trades').textContent = stats.unsuccessful_trades;
+            } catch (error) {
+                console.error('Error updating statistics:', error);
             }
         }
 
         async function updateAll() {
             await Promise.all([
                 updateStatus(),
+                updateStatistics(),
                 updateMarkets(),
                 updateOrders(),
                 updateLogs()
             ]);
+            ensureCountdownTimer();
+            refreshCountdowns();
+            refreshLoopProgress();
         }
 
-        // Initial update
-        updateAll();
+        function refreshLoopProgress() {
+            if (!loopMeta.interval) return;
+            const bar = document.getElementById('loop-progress');
+            const eta = document.getElementById('loop-eta');
+            if (!bar || !eta) return;
 
-        // Auto-refresh every 5 seconds
+            const intervalMs = (loopMeta.interval || 0) * 1000;
+            if (!intervalMs) {
+                bar.style.width = '0%';
+                eta.textContent = 'Next run in --';
+                return;
+            }
+
+            const now = Date.now();
+            const last = loopMeta.last ? new Date(loopMeta.last).getTime() : now;
+            let next = loopMeta.next ? new Date(loopMeta.next).getTime() : last + intervalMs;
+            if (next <= last) next = last + intervalMs;
+
+            const progress = Math.min(1, Math.max(0, (now - last) / intervalMs));
+            const remainingMs = Math.max(0, next - now);
+            const remainingSec = Math.round(remainingMs / 1000);
+            const mins = Math.floor(remainingSec / 60);
+            const secs = remainingSec % 60;
+            const pad = (n) => n.toString().padStart(2, '0');
+
+            bar.style.width = `${(progress * 100).toFixed(0)}%`;
+            eta.textContent = isBotRunning
+                ? `Next run in ${pad(mins)}:${pad(secs)}`
+                : 'Bot stopped';
+        }
+
+        function updateLoopUi() {
+            const nextEl = document.getElementById('loop-next');
+            if (!nextEl) return;
+            if (loopMeta.next) {
+                nextEl.textContent = formatTime(loopMeta.next);
+            } else if (loopMeta.last && loopMeta.interval) {
+                const fallback = new Date(new Date(loopMeta.last).getTime() + loopMeta.interval * 1000);
+                nextEl.textContent = formatTime(fallback.toISOString());
+            } else {
+                nextEl.textContent = isBotRunning ? 'Calculating...' : '--';
+            }
+        }
+
+        updateAll();
         setInterval(updateAll, 5000);
     </script>
 </body>

@@ -6,7 +6,7 @@ import json
 import os
 from datetime import datetime, timedelta
 from typing import List, Dict
-from models import Market, OrderRecord, OrderStatus, BotState, OrderSide
+from models import Market, Outcome, OrderRecord, OrderStatus, BotState, OrderSide
 from market_discovery import MarketDiscovery
 from order_manager import OrderManager
 from auto_redeem import AutoRedeemer
@@ -35,6 +35,10 @@ class PolymarketBot:
         self.last_merge_attempt: Dict[str, datetime] = {}  # condition_id -> timestamp
         self.merged_amounts: Dict[str, float] = {}  # condition_id -> total merged sets
 
+        # Strategy tracking
+        self.market_start_times: Dict[str, datetime] = {}  # condition_id -> market start time
+        self.strategy_executed: Dict[str, bool] = {}  # condition_id -> executed flag
+
         # Redemption tracking
         self.last_redemption_check = None
 
@@ -42,6 +46,7 @@ class PolymarketBot:
         self.orders_file = "bot_orders.json"
         self.order_history_file = "order_history.json"
         self.order_history: Dict[str, OrderRecord] = {}
+        self.markets_file = "markets_state.json"
 
         # Lock for thread safety
         self.lock = threading.Lock()
@@ -54,16 +59,19 @@ class PolymarketBot:
         logger.info(f"Wallet address: {self.order_manager.address}")
         logger.info(f"Order size: ${Config.ORDER_SIZE_USD} per order")
         logger.info(f"Spread offset: {Config.SPREAD_OFFSET}")
-        logger.info(f"Order placement: {Config.ORDER_PLACEMENT_MINUTES_BEFORE} min before start")
+        logger.info(f"Order placement window: {Config.ORDER_PLACEMENT_MIN_MINUTES}-{Config.ORDER_PLACEMENT_MAX_MINUTES} min before start")
         logger.info("=" * 60)
 
         with self.lock:
             self.state.is_running = True
             # Initialize balance immediately so dashboard shows correct data
             self.state.usdc_balance = self.order_manager.get_usdc_balance()
+            # Set an initial last_check so the dashboard has a baseline immediately
+            self.state.last_check = datetime.now()
             logger.info(f"Initial USDC balance: ${self.state.usdc_balance:.2f}")
 
         # Load persisted orders from file
+        self._load_markets_from_file()
         self._load_order_history()
         self._load_orders_from_file()
 
@@ -114,7 +122,10 @@ class PolymarketBot:
             # Step 4: Check status of active orders
             self._check_active_orders()
 
-            # Step 4.5: Place fallback orders if idle and no positions pending
+            # Step 4.5: Check strategy execution timeouts
+            self._check_strategy_execution()
+
+            # Step 4.6: Place fallback orders if idle and no positions pending
             self._place_fallback_orders_if_idle(upcoming_markets)
 
             # Step 5: Clean up old markets and orders
@@ -135,6 +146,7 @@ class PolymarketBot:
         """Filter for upcoming and active markets (not yet ended)."""
         upcoming = []
         now = datetime.now().timestamp()
+        tracked_changed = False
 
         for market in markets:
             # Skip resolved markets
@@ -157,10 +169,15 @@ class PolymarketBot:
                 if market.condition_id not in self.tracked_markets:
                     self.tracked_markets[market.condition_id] = market
                     self.orders_placed[market.condition_id] = False
+                    self.market_start_times[market.condition_id] = market.start_datetime
+                    tracked_changed = True
                     logger.info(
                         f"Tracking new market: {market.market_slug} "
                         f"(starts in {time_until_start/60:.1f} minutes)"
                     )
+
+        if tracked_changed:
+            self._save_markets_to_file()
 
         return upcoming
 
@@ -182,6 +199,14 @@ class PolymarketBot:
                 )
             return
 
+        # Check if bot is working on another market
+        has_work, work_reason = self._has_active_market_work()
+        if has_work:
+            logger.info(
+                f"Skipping {market.market_slug} - bot is {work_reason}"
+            )
+            return
+
         # Time to place orders!
         logger.info(
             f"Placing orders for {market.market_slug} "
@@ -190,10 +215,13 @@ class PolymarketBot:
 
         try:
             # Place simple test orders: 2 orders (1 Yes, 1 No) at $0.49, 10 shares each
+            from config import Config
+
             orders = self.order_manager.place_simple_test_orders(
                 market=market,
                 price=0.49,
-                size=10.0
+                size=10.0,
+                strategy=Config.STRATEGY_NAME
             )
 
             if orders:
@@ -226,6 +254,133 @@ class PolymarketBot:
                 exc_info=True
             )
 
+    def _check_strategy_execution(self):
+        """
+        Check if strategy timeout has been reached for any active markets.
+        Execute strategy actions (cancel + market sell) if timeout reached.
+        """
+        from config import Config
+        now = datetime.now()
+
+        for condition_id, orders in list(self.active_orders.items()):
+            # Skip if strategy already executed
+            if self.strategy_executed.get(condition_id, False):
+                continue
+
+            # Skip if no strategy assigned (backward compatibility)
+            if not orders or not orders[0].strategy:
+                continue
+
+            # Skip if market has ended (let end-of-market cleanup handle it)
+            market = self.tracked_markets.get(condition_id)
+            if not market:
+                continue
+            if now.timestamp() >= market.end_timestamp:
+                continue
+
+            # Skip if positions already sold/merged
+            if self.positions_sold.get(condition_id, False):
+                self.strategy_executed[condition_id] = True
+                continue
+
+            # Get strategy config
+            strategy_config = Config.get_strategy_config(orders[0].strategy)
+            if not strategy_config or not strategy_config.get("enabled"):
+                continue
+
+            # Get market start time
+            market_start_time = self.market_start_times.get(condition_id)
+            if not market_start_time:
+                # Cache market start time on first check
+                self.market_start_times[condition_id] = market.start_datetime
+                market_start_time = market.start_datetime
+
+            # Check if market has started
+            if now < market_start_time:
+                continue
+
+            # Calculate time since market start
+            time_since_start = (now - market_start_time).total_seconds()
+            timeout = strategy_config.get("exit_timeout_seconds")
+
+            if timeout is None:
+                continue
+
+            # Check if timeout reached
+            if time_since_start >= timeout:
+                logger.info(
+                    f"Strategy '{orders[0].strategy}' timeout reached for {market.market_slug} "
+                    f"({time_since_start:.0f}s since market start, timeout={timeout}s)"
+                )
+
+                # Execute strategy actions
+                self._execute_strategy_exit(market, orders, strategy_config)
+
+                # Mark as executed
+                self.strategy_executed[condition_id] = True
+                self._save_orders_to_file()
+
+    def _execute_strategy_exit(
+        self,
+        market: Market,
+        orders: List[OrderRecord],
+        strategy_config: dict
+    ):
+        """
+        Execute strategy exit actions: cancel unfilled orders and market sell filled positions.
+
+        Args:
+            market: Market information
+            orders: List of orders for this market
+            strategy_config: Strategy configuration dict
+        """
+        try:
+            # Step 1: Cancel unfilled/partially-filled orders
+            if strategy_config.get("cancel_unfilled", False):
+                from models import OrderStatus
+                unfilled = [
+                    o for o in orders
+                    if o.status in [OrderStatus.PLACED, OrderStatus.PARTIALLY_FILLED]
+                ]
+                if unfilled:
+                    logger.info(
+                        f"Strategy exit: Cancelling {len(unfilled)} unfilled orders for {market.market_slug}"
+                    )
+                    cancelled_count = self.order_manager.cancel_orders(unfilled)
+                    logger.info(f"Cancelled {cancelled_count} orders")
+
+            # Step 2: Market sell filled positions
+            if strategy_config.get("market_sell_filled", False):
+                # Get filled amounts
+                filled_amounts = self._get_filled_amounts(orders)
+                merged_amount = self.merged_amounts.get(market.condition_id, 0.0)
+
+                remaining_yes = max(0.0, filled_amounts["YES"] - merged_amount)
+                remaining_no = max(0.0, filled_amounts["NO"] - merged_amount)
+
+                if remaining_yes > 0 or remaining_no > 0:
+                    logger.info(
+                        f"Strategy exit: Market selling filled positions for {market.market_slug} "
+                        f"(YES={remaining_yes:.2f}, NO={remaining_no:.2f})"
+                    )
+
+                    try:
+                        # Sell using existing _sell_remaining_positions logic
+                        self._sell_remaining_positions(market, orders, merged_amount)
+                    except Exception as sell_error:
+                        logger.error(f"Strategy market sell failed: {sell_error}", exc_info=True)
+                        # Don't raise - mark as executed anyway to prevent retry loops
+
+            # Mark market as finalized
+            self.positions_sold[market.condition_id] = True
+
+            logger.info(f"Strategy exit completed for {market.market_slug}")
+
+        except Exception as e:
+            logger.error(f"Error executing strategy exit: {e}", exc_info=True)
+            # Mark as executed to prevent infinite retries
+            self.strategy_executed[market.condition_id] = True
+
     def _check_active_orders(self):
         """Check status of all active orders."""
         status_changed = False
@@ -244,13 +399,16 @@ class PolymarketBot:
             # Check each order
             for order in orders:
                 if order.status in [OrderStatus.PLACED, OrderStatus.PARTIALLY_FILLED]:
+                    # Capture original status before update
+                    original_status = order.status
+
                     updated_order = self.order_manager.check_order_status(order)
 
                     # Log status changes
-                    if updated_order.status != order.status:
+                    if updated_order.status != original_status:
                         logger.info(
                             f"Order {order.order_id} status changed: "
-                            f"{order.status.value} -> {updated_order.status.value}"
+                            f"{original_status.value} -> {updated_order.status.value}"
                         )
                         status_changed = True
                     self._upsert_order_history(updated_order)
@@ -349,27 +507,35 @@ class PolymarketBot:
         if updated_orders:
             self.active_orders[condition_id] = updated_orders
             if not self.positions_sold.get(condition_id, False):
-                now = datetime.now()
-                last_attempt = self.last_merge_attempt.get(condition_id)
-                if last_attempt is None or (now - last_attempt).total_seconds() >= 30:
-                    market_stub = self._build_orphan_market(condition_id, updated_orders)
-                    merged_amount = self.order_manager.merge_positions_if_possible(
-                        market_stub,
-                        updated_orders,
-                        already_merged_amount=self.merged_amounts.get(condition_id, 0.0)
-                    )
-                    if merged_amount > 0:
-                        self.merged_amounts[condition_id] = (
-                            self.merged_amounts.get(condition_id, 0.0) + merged_amount
+                # Check if orphan should be auto-finalized
+                if self._should_auto_finalize_orphan(condition_id, updated_orders):
+                    logger.info(f"Marking orphaned market {condition_id[:16]} as finalized")
+                    self.positions_sold[condition_id] = True
+                    self.active_orders.pop(condition_id, None)
+                    self.last_merge_attempt.pop(condition_id, None)
+                    changed = True
+                else:
+                    now = datetime.now()
+                    last_attempt = self.last_merge_attempt.get(condition_id)
+                    if last_attempt is None or (now - last_attempt).total_seconds() >= 30:
+                        market_stub = self._build_orphan_market(condition_id, updated_orders)
+                        merged_amount = self.order_manager.merge_positions_if_possible(
+                            market_stub,
+                            updated_orders,
+                            already_merged_amount=self.merged_amounts.get(condition_id, 0.0)
                         )
-                        changed = True
-                    self.last_merge_attempt[condition_id] = now
-                    if self._all_positions_merged(
-                        updated_orders,
-                        self.merged_amounts.get(condition_id, 0.0)
-                    ):
-                        self.positions_sold[condition_id] = True
-                        changed = True
+                        if merged_amount > 0:
+                            self.merged_amounts[condition_id] = (
+                                self.merged_amounts.get(condition_id, 0.0) + merged_amount
+                            )
+                            changed = True
+                        self.last_merge_attempt[condition_id] = now
+                        if self._all_positions_merged(
+                            updated_orders,
+                            self.merged_amounts.get(condition_id, 0.0)
+                        ):
+                            self.positions_sold[condition_id] = True
+                            changed = True
             return changed
 
         logger.info(
@@ -385,15 +551,36 @@ class PolymarketBot:
 
     def _build_orphan_market(self, condition_id: str, orders: List[OrderRecord]) -> Market:
         """Create a minimal market object for orphaned orders."""
+        from models import Outcome
+
         now_ts = int(datetime.now().timestamp())
         market_slug = orders[0].market_slug if orders else f"orphaned-{condition_id[:16]}"
+
+        # Build outcomes from orders' token_ids
+        outcomes = []
+        seen_tokens = set()
+        for order in orders:
+            if order.token_id and order.token_id not in seen_tokens:
+                # Try to infer outcome from order outcome field
+                outcome_name = order.outcome if order.outcome and order.outcome != "Unknown" else None
+
+                # If still unknown, assign generic names based on order of appearance
+                if not outcome_name:
+                    outcome_name = "Up" if len(outcomes) == 0 else "Down"
+
+                outcomes.append(Outcome(
+                    token_id=order.token_id,
+                    outcome=outcome_name
+                ))
+                seen_tokens.add(order.token_id)
+
         return Market(
             condition_id=condition_id,
             market_slug=market_slug,
             question="Orphaned market",
             start_timestamp=now_ts - 60,
             end_timestamp=now_ts + 3600,
-            outcomes=[]
+            outcomes=outcomes
         )
 
     def _place_fallback_orders_if_idle(self, upcoming_markets: List[Market]):
@@ -401,24 +588,10 @@ class PolymarketBot:
         if not upcoming_markets:
             return
 
-        has_live_orders = False
-        for orders in self.active_orders.values():
-            if any(o.status in [OrderStatus.PLACED, OrderStatus.PARTIALLY_FILLED] for o in orders):
-                has_live_orders = True
-                break
-
-        if has_live_orders:
-            return
-
-        has_unprocessed_positions = False
-        for condition_id, orders in self.active_orders.items():
-            if self.positions_sold.get(condition_id, False):
-                continue
-            if any(o.status in [OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED] for o in orders):
-                has_unprocessed_positions = True
-                break
-
-        if has_unprocessed_positions:
+        # Use the same helper for consistency
+        has_work, work_reason = self._has_active_market_work()
+        if has_work:
+            # Bot is busy, don't place fallback orders
             return
 
         now_ts = datetime.now().timestamp()
@@ -430,16 +603,24 @@ class PolymarketBot:
         if self.orders_placed.get(next_market.condition_id, False):
             return
 
+        # Check if it's time to place orders (respect 15-min timing window)
+        if not next_market.should_place_orders:
+            # Market exists but it's not time yet
+            return
+
         logger.info(
             f"Idle state detected. Placing fallback orders for next market: "
             f"{next_market.market_slug} (starts in {next_market.time_until_start/60:.1f} minutes)"
         )
 
         try:
+            from config import Config
+
             orders = self.order_manager.place_simple_test_orders(
                 market=next_market,
                 price=0.49,
-                size=10.0
+                size=10.0,
+                strategy=Config.STRATEGY_NAME
             )
 
             if orders:
@@ -483,6 +664,12 @@ class PolymarketBot:
             if order.status in [OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED]:
                 try:
                     order_details = self.order_manager.client.get_order(order.order_id)
+
+                    # Check if API returned None (old/expired order data)
+                    if not order_details:
+                        logger.debug(f"No API data for order {order.order_id} - may be expired")
+                        continue
+
                     size_matched = float(order_details.get("size_matched", 0))
                     if size_matched > 0:
                         normalized = self._normalize_outcome(order.outcome)
@@ -491,6 +678,179 @@ class PolymarketBot:
                 except Exception as e:
                     logger.warning(f"Could not get filled size for order {order.order_id}: {e}")
         return filled
+
+    def _has_active_market_work(self) -> tuple[bool, str]:
+        """
+        Check if bot has active work in any market.
+
+        Returns:
+            Tuple of (has_work, reason_string)
+            - has_work: True if bot is busy with a market
+            - reason_string: Human-readable explanation of what's blocking
+        """
+        # Check 1: Are there any live orders (PLACED or PARTIALLY_FILLED)?
+        for condition_id, orders in self.active_orders.items():
+            live_orders = [
+                o for o in orders
+                if o.status in [OrderStatus.PLACED, OrderStatus.PARTIALLY_FILLED]
+            ]
+            if live_orders:
+                market = self.tracked_markets.get(condition_id)
+                market_name = market.market_slug if market else condition_id[:16]
+                return True, f"waiting for {len(live_orders)} orders to fill in {market_name}"
+
+        # Check 2: Are there unprocessed positions (filled but not merged)?
+        for condition_id, orders in self.active_orders.items():
+            # Skip if already finalized
+            if self.positions_sold.get(condition_id, False):
+                continue
+
+            # Check if any orders are filled/partially filled
+            filled_orders = [
+                o for o in orders
+                if o.status in [OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED]
+            ]
+            if filled_orders:
+                market = self.tracked_markets.get(condition_id)
+                market_name = market.market_slug if market else condition_id[:16]
+
+                # Check if positions are merged (use wallet balance as source of truth)
+                if not self._wallet_positions_are_cleared(orders):
+                    return True, f"waiting to merge positions in {market_name}"
+
+        # No active work
+        return False, ""
+
+    def _wallet_positions_are_cleared(self, orders: List[OrderRecord]) -> bool:
+        """
+        Check if actual on-chain wallet positions are cleared (merged or never existed).
+
+        This is the SOURCE OF TRUTH - wallet balances, not API filled amounts.
+        """
+        # Get token IDs from orders
+        yes_token_id = None
+        no_token_id = None
+
+        for order in orders:
+            outcome_upper = order.outcome.strip().upper()
+            if outcome_upper in ["YES", "UP"] and yes_token_id is None:
+                yes_token_id = order.token_id
+            elif outcome_upper in ["NO", "DOWN"] and no_token_id is None:
+                no_token_id = order.token_id
+
+        # If we can't get token IDs, assume positions are cleared
+        if not yes_token_id or not no_token_id:
+            logger.debug(f"Cannot verify wallet positions - missing token IDs")
+            return True
+
+        # Check actual wallet balances (SOURCE OF TRUTH!)
+        try:
+            actual_balances = self.order_manager._get_token_balances([yes_token_id, no_token_id])
+            actual_yes = actual_balances.get(yes_token_id, 0.0)
+            actual_no = actual_balances.get(no_token_id, 0.0)
+
+            # Positions are cleared if both are essentially zero
+            positions_cleared = actual_yes <= 0.001 and actual_no <= 0.001
+
+            if not positions_cleared:
+                logger.debug(
+                    f"Wallet positions NOT cleared: YES={actual_yes}, NO={actual_no}"
+                )
+
+            return positions_cleared
+
+        except Exception as e:
+            logger.warning(f"Could not check wallet balances: {e}")
+            # If we can't check, assume cleared to avoid blocking
+            return True
+
+    def _should_auto_finalize_orphan(self, condition_id: str, orders: List[OrderRecord]) -> bool:
+        """
+        Check if orphaned orders should be auto-finalized.
+
+        Auto-finalize if:
+        1. Missing critical data (token_ids or Unknown outcomes)
+        2. Wallet has no positions (0.0 for both YES and NO)
+        3. Market is not actively tracked
+        4. No live orders (all FILLED, CANCELLED, or FAILED)
+
+        This prevents endless retry loops for unrecoverable old orders.
+        """
+        # Check 1: Is this an orphaned market?
+        if condition_id in self.tracked_markets:
+            return False  # Active market, don't auto-finalize
+
+        # Check 2: Are there live orders? (Don't finalize if orders still active)
+        live_orders = [
+            o for o in orders
+            if o.status in [OrderStatus.PLACED, OrderStatus.PARTIALLY_FILLED]
+        ]
+        if live_orders:
+            return False  # Live orders exist, wait for them to fill/cancel
+
+        # Check 3: Check for missing token IDs or Unknown outcomes
+        missing_data = False
+        for order in orders:
+            if not order.token_id or order.outcome.upper() == "UNKNOWN":
+                missing_data = True
+                break
+
+        if not missing_data:
+            return False  # Has all data, don't auto-finalize
+
+        # Check 4: Verify wallet has 0 positions (already merged or never existed)
+        try:
+            # Try to get token IDs from any order that has them
+            yes_token_id = None
+            no_token_id = None
+
+            for order in orders:
+                if order.token_id:
+                    outcome_upper = order.outcome.strip().upper()
+                    if outcome_upper in ["YES", "UP"] and yes_token_id is None:
+                        yes_token_id = order.token_id
+                    elif outcome_upper in ["NO", "DOWN"] and no_token_id is None:
+                        no_token_id = order.token_id
+
+            # If we got at least one token ID, check wallet
+            if yes_token_id and no_token_id:
+                balances = self.order_manager._get_token_balances([yes_token_id, no_token_id])
+                yes_bal = balances.get(yes_token_id, 0.0)
+                no_bal = balances.get(no_token_id, 0.0)
+
+                # If wallet has positions, don't finalize (may need to merge/sell)
+                if yes_bal > 0.001 or no_bal > 0.001:
+                    logger.debug(
+                        f"Orphan {condition_id[:16]} has wallet positions "
+                        f"(YES={yes_bal}, NO={no_bal}) - not auto-finalizing"
+                    )
+                    return False
+
+                # Wallet is empty - safe to finalize
+                logger.info(
+                    f"Auto-finalizing orphaned market {condition_id[:16]}: "
+                    f"missing data + wallet empty (YES={yes_bal}, NO={no_bal})"
+                )
+                return True
+
+            else:
+                # Can't verify wallet (missing both token IDs)
+                # If orders are old (>24h) and not live, safe to finalize
+                oldest_order = min(orders, key=lambda o: o.created_at, default=None)
+                if oldest_order:
+                    age_hours = (datetime.now() - oldest_order.created_at).total_seconds() / 3600
+                    if age_hours > 24:
+                        logger.info(
+                            f"Auto-finalizing orphaned market {condition_id[:16]}: "
+                            f"missing token IDs, {age_hours:.1f}h old, no live orders"
+                        )
+                        return True
+
+            return False
+
+        except Exception as e:
+            logger.warning(f"Could not check wallet for orphan {condition_id[:16]}: {e}")
+            return False  # If check fails, don't auto-finalize (be conservative)
 
     def _all_positions_merged(self, orders: List[OrderRecord], merged_amount: float) -> bool:
         """Return True if all filled positions have been merged."""
@@ -616,7 +976,8 @@ class PolymarketBot:
                         status=OrderStatus(order_dict["status"]),
                         created_at=datetime.fromisoformat(order_dict["created_at"]),
                         filled_at=datetime.fromisoformat(order_dict["filled_at"]) if order_dict.get("filled_at") else None,
-                        error_message=order_dict.get("error_message")
+                        error_message=order_dict.get("error_message"),
+                        strategy=order_dict.get("strategy")
                     )
                     self._upsert_order_history(order)
                 except Exception as e:
@@ -645,7 +1006,8 @@ class PolymarketBot:
                     "status": order.status.value,
                     "created_at": order.created_at.isoformat() if order.created_at else None,
                     "filled_at": order.filled_at.isoformat() if order.filled_at else None,
-                    "error_message": order.error_message
+                    "error_message": order.error_message,
+                    "strategy": order.strategy
                 })
 
             history_list.sort(key=lambda o: o.get("created_at") or "", reverse=True)
@@ -676,6 +1038,21 @@ class PolymarketBot:
             from models import OrderRecord, OrderStatus, OrderSide
             recovered_count = 0
 
+            # Build quick lookup from already-loaded orders (from file) to hydrate metadata
+            existing_meta = {}
+            for orders in self.active_orders.values():
+                for o in orders:
+                    existing_meta[(o.condition_id, str(o.token_id))] = (o.market_slug, o.outcome)
+                    # also store by condition only for slug fallback
+                    existing_meta[(o.condition_id, None)] = (o.market_slug, o.outcome)
+
+            # Helper to avoid duplicating orders already tracked
+            def _already_tracked(order_id: str) -> bool:
+                for orders in self.active_orders.values():
+                    if any(o.order_id == order_id for o in orders):
+                        return True
+                return False
+
             for order_data in all_open_orders:
                 try:
                     # Extract order details
@@ -686,20 +1063,40 @@ class PolymarketBot:
                     size = float(order_data.get('size', 0))
                     side = OrderSide.BUY if order_data.get('side', '') == 'BUY' else OrderSide.SELL
 
+                    # Skip if we already have this order tracked (e.g., loaded from file)
+                    if _already_tracked(order_id):
+                        continue
+
+                    # Hydrate market slug/outcome from saved metadata if possible
+                    slug = f"recovered-{market_condition[:16]}"
+                    outcome_name = "Unknown"
+                    meta_key = (market_condition, str(token_id))
+                    if meta_key in existing_meta:
+                        slug, outcome_name = existing_meta[meta_key]
+                    elif (market_condition, None) in existing_meta:
+                        slug, outcome_name = existing_meta[(market_condition, None)]
+
                     # Create OrderRecord
                     order_record = OrderRecord(
                         order_id=order_id,
-                        market_slug=f"recovered-{market_condition[:16]}",
+                        market_slug=slug,
                         condition_id=market_condition,
                         token_id=token_id,
-                        outcome="Unknown",  # Will be updated later
+                        outcome=outcome_name,
                         side=side,
                         price=price,
                         size=size,
                         size_usd=price * size,
                         status=OrderStatus.PLACED,
-                        created_at=datetime.now()
+                        created_at=datetime.now(),
+                        strategy=None  # Recovered orders have no strategy metadata
                     )
+
+                    # Refresh actual status from the orderbook so we don't mark live orders as cancelled/unknown
+                    try:
+                        order_record = self.order_manager.check_order_status(order_record)
+                    except Exception as e:
+                        logger.warning(f"Could not refresh recovered order {order_id}: {e}")
 
                     # Add to active_orders
                     if market_condition not in self.active_orders:
@@ -707,7 +1104,8 @@ class PolymarketBot:
                     self.active_orders[market_condition].append(order_record)
 
                     # Mark market as having orders placed
-                    self.orders_placed[market_condition] = True
+                    if order_record.status in [OrderStatus.PLACED, OrderStatus.PARTIALLY_FILLED]:
+                        self.orders_placed[market_condition] = True
 
                     recovered_count += 1
 
@@ -719,6 +1117,8 @@ class PolymarketBot:
             # Update order lists for dashboard
             with self.lock:
                 self._update_order_lists()
+                self._sync_history_from_active_orders()
+                self._save_order_history()
 
         except Exception as e:
             logger.error(f"Error recovering existing orders: {e}", exc_info=True)
@@ -742,7 +1142,8 @@ class PolymarketBot:
                         "size_usd": o.size_usd,
                         "status": o.status.value,
                         "created_at": o.created_at.isoformat(),
-                        "error_message": o.error_message
+                        "error_message": o.error_message,
+                        "strategy": o.strategy
                     }
                     for o in orders
                 ]
@@ -758,6 +1159,70 @@ class PolymarketBot:
 
         except Exception as e:
             logger.error(f"Error saving orders to file: {e}", exc_info=True)
+
+    def _save_markets_to_file(self):
+        """Persist tracked markets so restarts keep market/outcome metadata."""
+        try:
+            markets_data = {}
+            for condition_id, market in self.tracked_markets.items():
+                markets_data[condition_id] = {
+                    "condition_id": market.condition_id,
+                    "market_slug": market.market_slug,
+                    "question": market.question,
+                    "start_timestamp": market.start_timestamp,
+                    "end_timestamp": market.end_timestamp,
+                    "is_active": market.is_active,
+                    "is_resolved": market.is_resolved,
+                    "outcomes": [
+                        {"token_id": o.token_id, "outcome": o.outcome}
+                        for o in market.outcomes
+                    ]
+                }
+
+            with open(self.markets_file, "w") as f:
+                json.dump(markets_data, f, indent=2)
+            logger.debug(f"Saved {len(markets_data)} markets to {self.markets_file}")
+        except Exception as e:
+            logger.error(f"Error saving markets to file: {e}", exc_info=True)
+
+    def _load_markets_from_file(self):
+        """Load persisted markets to restore outcome metadata on restart."""
+        try:
+            if not os.path.exists(self.markets_file):
+                return
+
+            with open(self.markets_file, "r") as f:
+                markets_data = json.load(f)
+
+            if not markets_data:
+                return
+
+            loaded_count = 0
+            for condition_id, market_dict in markets_data.items():
+                try:
+                    outcomes = []
+                    for o in market_dict.get("outcomes", []):
+                        outcomes.append(Outcome(token_id=o.get("token_id", ""), outcome=o.get("outcome", "")))
+
+                    market = Market(
+                        condition_id=market_dict["condition_id"],
+                        market_slug=market_dict["market_slug"],
+                        question=market_dict["question"],
+                        start_timestamp=market_dict["start_timestamp"],
+                        end_timestamp=market_dict["end_timestamp"],
+                        outcomes=outcomes,
+                        is_active=market_dict.get("is_active", False),
+                        is_resolved=market_dict.get("is_resolved", False)
+                    )
+                    self.tracked_markets[condition_id] = market
+                    loaded_count += 1
+                except Exception as e:
+                    logger.warning(f"Could not load market {condition_id}: {e}")
+
+            if loaded_count > 0:
+                logger.info(f"Loaded {loaded_count} markets from {self.markets_file}")
+        except Exception as e:
+            logger.error(f"Error loading markets from file: {e}", exc_info=True)
 
     def _load_orders_from_file(self):
         """Load orders from file on startup."""
@@ -779,29 +1244,56 @@ class PolymarketBot:
             loaded_count = 0
             for condition_id, orders_list in orders_data.items():
                 self.active_orders[condition_id] = []
+                has_open_orders = False
                 for order_dict in orders_list:
                     try:
+                        outcome_name = order_dict.get("outcome", "")
+                        token_id = order_dict.get("token_id", "")
+                        if (not outcome_name or outcome_name == "Unknown") and condition_id in self.tracked_markets:
+                            for outcome in self.tracked_markets[condition_id].outcomes:
+                                if str(outcome.token_id) == str(token_id):
+                                    outcome_name = outcome.outcome
+                                    break
+
                         order = OrderRecord(
                             order_id=order_dict["order_id"],
                             market_slug=order_dict["market_slug"],
                             condition_id=order_dict["condition_id"],
-                            token_id=order_dict["token_id"],
-                            outcome=order_dict["outcome"],
+                            token_id=token_id,
+                            outcome=outcome_name,
                             side=OrderSide(order_dict["side"]),
                             price=order_dict["price"],
                             size=order_dict["size"],
                             size_usd=order_dict["size_usd"],
                             status=OrderStatus(order_dict["status"]),
                             created_at=datetime.fromisoformat(order_dict["created_at"]),
-                            error_message=order_dict.get("error_message")
+                            filled_at=datetime.fromisoformat(order_dict["filled_at"]) if order_dict.get("filled_at") else None,
+                            error_message=order_dict.get("error_message"),
+                            strategy=order_dict.get("strategy")
                         )
                         self.active_orders[condition_id].append(order)
-                        self.orders_placed[condition_id] = True
+                        if order.status in [OrderStatus.PLACED, OrderStatus.PARTIALLY_FILLED]:
+                            has_open_orders = True
                         loaded_count += 1
                     except Exception as e:
                         logger.warning(f"Could not load order {order_dict.get('order_id', 'unknown')}: {e}")
+                if has_open_orders:
+                    self.orders_placed[condition_id] = True
 
             logger.info(f"Loaded {loaded_count} orders from {self.orders_file}")
+
+            # Refresh statuses for open orders to avoid stale history after restart
+            refreshed = 0
+            for condition_id, orders in self.active_orders.items():
+                for idx, order in enumerate(list(orders)):
+                    if order.status in [OrderStatus.PLACED, OrderStatus.PARTIALLY_FILLED]:
+                        try:
+                            updated = self.order_manager.check_order_status(order)
+                            orders[idx] = updated
+                            self._upsert_order_history(updated)
+                            refreshed += 1
+                        except Exception as e:
+                            logger.warning(f"Could not refresh order {order.order_id}: {e}")
 
             # Check for old orders that aren't in tracked markets and finalize their statuses
             self._finalize_orphaned_orders()
@@ -809,6 +1301,7 @@ class PolymarketBot:
             # Update order lists for dashboard
             with self.lock:
                 self._update_order_lists()
+            self._save_order_history()
 
         except Exception as e:
             logger.error(f"Error loading orders from file: {e}", exc_info=True)
@@ -841,9 +1334,12 @@ class PolymarketBot:
             self.positions_sold.pop(condition_id, None)
             self.last_merge_attempt.pop(condition_id, None)
             self.merged_amounts.pop(condition_id, None)
+            self.market_start_times.pop(condition_id, None)
+            self.strategy_executed.pop(condition_id, None)
 
         # Save updated statuses to file
         self._save_orders_to_file()
+        self._save_markets_to_file()
 
     def _finalize_old_order_statuses(self, condition_id: str):
         """
@@ -916,7 +1412,9 @@ class PolymarketBot:
 
                 for order in orders:
                     # Skip already-finalized statuses
-                    if order.status in [OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.FAILED]:
+                    if order.status in [OrderStatus.FILLED, OrderStatus.FAILED]:
+                        continue
+                    if order.status == OrderStatus.CANCELLED and self._is_orphan_market_expired(market_slug):
                         continue
 
                     # Check current status from orderbook
@@ -931,23 +1429,24 @@ class PolymarketBot:
                             )
                             status_changed = True
 
-                        # If still showing as PLACED/PARTIALLY_FILLED but market is orphaned,
-                        # it was likely cancelled or expired
+                        # Only mark as cancelled if the market is clearly expired
                         if updated_order.status in [OrderStatus.PLACED, OrderStatus.PARTIALLY_FILLED]:
-                            logger.info(
-                                f"Order {order.order_id[:16]}... still shows as {order.status.value} "
-                                f"for orphaned market - marking as CANCELLED"
-                            )
-                            order.status = OrderStatus.CANCELLED
-                            status_changed = True
+                            if self._is_orphan_market_expired(market_slug):
+                                logger.info(
+                                    f"Order {order.order_id[:16]}... still shows as {order.status.value} "
+                                    f"for expired market - marking as CANCELLED"
+                                )
+                                order.status = OrderStatus.CANCELLED
+                                status_changed = True
 
                     except Exception as e:
                         logger.warning(f"Could not check status for orphaned order {order.order_id}: {e}")
-                        # If we can't check and it's not already finalized, mark as cancelled
+                        # If we can't check, only cancel if the market is clearly expired
                         if order.status in [OrderStatus.PLACED, OrderStatus.PARTIALLY_FILLED]:
-                            logger.info(f"Marking unreachable orphaned order as CANCELLED")
-                            order.status = OrderStatus.CANCELLED
-                            status_changed = True
+                            if self._is_orphan_market_expired(market_slug):
+                                logger.info("Marking unreachable orphaned order as CANCELLED (expired market)")
+                                order.status = OrderStatus.CANCELLED
+                                status_changed = True
 
             # Save if any statuses changed
             if status_changed:
@@ -956,6 +1455,46 @@ class PolymarketBot:
 
         except Exception as e:
             logger.error(f"Error finalizing orphaned orders: {e}", exc_info=True)
+
+    def _is_orphan_market_expired(self, market_slug: str) -> bool:
+        """Return True if the market slug implies a clearly expired market window."""
+        try:
+            if "btc-updown-15m-" not in market_slug:
+                return False
+            ts_str = market_slug.split("btc-updown-15m-")[-1].split("-")[0]
+            start_ts = int(ts_str)
+            end_ts = start_ts + (15 * 60)
+            now = datetime.now().timestamp()
+            return now > (end_ts + 300)  # 5 min grace
+        except Exception:
+            return False
+
+    def _is_market_still_active(self, condition_id: str, now: float) -> bool:
+        """
+        Check if a market is still active (not ended).
+
+        Args:
+            condition_id: Market condition ID
+            now: Current timestamp
+
+        Returns:
+            True if market is still active, False if ended
+        """
+        market = self.tracked_markets.get(condition_id)
+
+        if not market:
+            # Market not in tracked list - likely ended
+            return False
+
+        # Check if market has ended (with 5 minute grace period)
+        if market.end_timestamp < (now - 300):
+            return False
+
+        # Check if market is resolved
+        if market.is_resolved:
+            return False
+
+        return True
 
     def _update_order_lists(self):
         """Update order lists in state for dashboard."""
@@ -966,10 +1505,14 @@ class PolymarketBot:
         # Sort by creation time
         all_orders.sort(key=lambda o: o.created_at, reverse=True)
 
-        # Separate pending and recent
+        # Get current timestamp for market end checking
+        now = datetime.now().timestamp()
+
+        # Separate pending and recent - only show orders for active markets
         pending = [
             o for o in all_orders
             if o.status in [OrderStatus.PLACED, OrderStatus.PARTIALLY_FILLED]
+            and self._is_market_still_active(o.condition_id, now)
         ]
         history_orders = list(self.order_history.values())
         history_orders.sort(

@@ -1,7 +1,9 @@
 """FastAPI dashboard for monitoring the bot."""
 
 import threading
-from datetime import datetime
+import json
+from collections import defaultdict
+from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
@@ -10,6 +12,7 @@ import uvicorn
 from bot import get_bot_instance, run_bot_loop
 from config import Config
 from logger import logger
+from models import OrderRecord, OrderStatus
 
 app = FastAPI(title="Polymarket Limit Order Bot Dashboard")
 templates = Jinja2Templates(directory="templates")
@@ -46,6 +49,7 @@ async def get_status():
         bot = get_bot_instance()
         logger.debug(f"API: bot instance id={id(bot)}, is_running={bot.state.is_running}")
         state = bot.get_state()
+        now = datetime.now()
 
         # Check if bot has sufficient balance to place orders
         from config import Config
@@ -66,7 +70,11 @@ async def get_status():
         # Format data for JSON response
         return {
             "is_running": state.is_running,
-            "last_check": state.last_check.isoformat() if state.last_check else None,
+            "last_check": (state.last_check or now).isoformat(),
+            "next_check": (
+                ((state.last_check or now) + timedelta(seconds=Config.CHECK_INTERVAL_SECONDS)).isoformat()
+            ),
+            "check_interval_seconds": Config.CHECK_INTERVAL_SECONDS,
             "usdc_balance": round(state.usdc_balance, 2),
             "total_pnl": round(state.total_pnl, 2),
             "error_count": state.error_count,
@@ -144,6 +152,7 @@ async def get_orders():
                 "size": round(o.size, 2),
                 "size_usd": round(o.size_usd, 2),
                 "status": o.status.value,
+                "strategy": o.strategy,
                 "created_at": o.created_at.isoformat(),
                 "filled_at": o.filled_at.isoformat() if o.filled_at else None
             }
@@ -160,6 +169,7 @@ async def get_orders():
                 "size": round(o.size, 2),
                 "size_usd": round(o.size_usd, 2),
                 "status": o.status.value,
+                "strategy": o.strategy,
                 "created_at": o.created_at.isoformat(),
                 "filled_at": o.filled_at.isoformat() if o.filled_at else None,
                 "error_message": o.error_message
@@ -175,6 +185,87 @@ async def get_orders():
     except Exception as e:
         logger.error(f"Error getting orders: {e}")
         return {"error": str(e), "pending_orders": [], "recent_orders": []}
+
+
+@app.get("/api/statistics")
+async def get_statistics():
+    """Get trading statistics."""
+    try:
+        bot = get_bot_instance()
+        if not bot:
+            return {
+                "total_markets": 0,
+                "successful_trades": 0,
+                "unsuccessful_trades": 0
+            }
+
+        # Load order history
+        try:
+            with open("order_history.json", "r") as f:
+                order_history_data = json.load(f)
+                order_history = [OrderRecord(**order) for order in order_history_data]
+        except FileNotFoundError:
+            order_history = []
+
+        # Group orders by condition_id (market)
+        markets = defaultdict(list)
+
+        for order in order_history:
+            markets[order.condition_id].append(order)
+
+        # Analyze each market
+        total_markets = len(markets)
+        successful_trades = 0
+        unsuccessful_trades = 0
+
+        for condition_id, orders in markets.items():
+            # Calculate filled amounts per outcome
+            yes_filled = 0.0
+            no_filled = 0.0
+
+            for order in orders:
+                if order.status in [OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED]:
+                    # Get the actual filled amount
+                    try:
+                        order_details = bot.order_manager.client.get_order(order.order_id)
+                        size_matched = float(order_details.get("size_matched", 0))
+
+                        # Normalize outcome
+                        outcome_upper = order.outcome.strip().upper()
+                        if outcome_upper in ["YES", "UP"]:
+                            yes_filled += size_matched
+                        elif outcome_upper in ["NO", "DOWN"]:
+                            no_filled += size_matched
+                    except Exception:
+                        # If API call fails, use order size as approximation for FILLED orders
+                        if order.status == OrderStatus.FILLED:
+                            outcome_upper = order.outcome.strip().upper()
+                            if outcome_upper in ["YES", "UP"]:
+                                yes_filled += order.size
+                            elif outcome_upper in ["NO", "DOWN"]:
+                                no_filled += order.size
+
+            # Classify the market
+            if yes_filled > 0 and no_filled > 0:
+                # Both orders filled = successful
+                successful_trades += 1
+            else:
+                # No orders filled OR only one order filled = unsuccessful
+                unsuccessful_trades += 1
+
+        return {
+            "total_markets": total_markets,
+            "successful_trades": successful_trades,
+            "unsuccessful_trades": unsuccessful_trades
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting statistics: {e}", exc_info=True)
+        return {
+            "total_markets": 0,
+            "successful_trades": 0,
+            "unsuccessful_trades": 0
+        }
 
 
 @app.get("/api/logs")
