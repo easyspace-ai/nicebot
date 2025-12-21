@@ -41,12 +41,15 @@ class AutoRedeemer:
             abi=self.REDEEM_ABI
         )
 
-    def check_and_redeem_all(self) -> int:
+    def check_and_redeem_all(self):
         """
         Check for redeemable positions and redeem them automatically.
 
         Returns:
-            Number of positions successfully redeemed
+            Tuple of (count, redemption_details_list) where redemption_details is a list of dicts with:
+            - condition_id: str
+            - market_slug: str (from title)
+            - amount: float (total value redeemed)
         """
         try:
             # Fetch positions from Polymarket API
@@ -60,13 +63,13 @@ class AutoRedeemer:
             positions = response.json()
 
             if not positions:
-                return 0
+                return 0, []
 
             # Filter redeemable positions
             redeemable = [p for p in positions if p.get('redeemable', False)]
 
             if not redeemable:
-                return 0
+                return 0, []
 
             # Group by condition ID
             by_condition: Dict[str, List] = {}
@@ -85,6 +88,7 @@ class AutoRedeemer:
 
             # Redeem each market
             success_count = 0
+            redemption_details = []
 
             for cid, positions in by_condition.items():
                 market_title = positions[0]['title']
@@ -94,15 +98,21 @@ class AutoRedeemer:
 
                 if self._redeem_condition(cid):
                     success_count += 1
+                    # Track redemption details
+                    redemption_details.append({
+                        'condition_id': cid,
+                        'market_slug': market_title,  # API provides title, not slug
+                        'amount': market_value
+                    })
 
             if success_count > 0:
                 logger.info(f"✓ Redeemed {success_count}/{len(by_condition)} markets")
 
-            return success_count
+            return success_count, redemption_details
 
         except Exception as e:
             logger.error(f"Error in check_and_redeem_all: {e}", exc_info=True)
-            return 0
+            return 0, []
 
     def _redeem_condition(self, condition_id: str) -> bool:
         """Redeem a single condition."""

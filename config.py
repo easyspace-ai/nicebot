@@ -23,6 +23,8 @@ class Config:
     ORDER_PLACEMENT_MIN_MINUTES: int = int(os.getenv("ORDER_PLACEMENT_MIN_MINUTES", "10"))
     ORDER_PLACEMENT_MAX_MINUTES: int = int(os.getenv("ORDER_PLACEMENT_MAX_MINUTES", "20"))
     REDEEM_CHECK_INTERVAL_SECONDS: int = int(os.getenv("REDEEM_CHECK_INTERVAL_SECONDS", "60"))
+    MIN_SELL_PRICE: float = float(os.getenv("MIN_SELL_PRICE", "0.10"))
+    MARKET_SELL_DISCOUNT: float = float(os.getenv("MARKET_SELL_DISCOUNT", "0.02"))
 
     # Strategy Configuration
     STRATEGY_NAME: str = os.getenv("STRATEGY_NAME", "quick_exit_7_5min")

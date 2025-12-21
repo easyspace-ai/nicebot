@@ -83,10 +83,18 @@ class OrderRecord(BaseModel):
     size: float
     size_usd: float
     status: OrderStatus = OrderStatus.PENDING
+    strategy: Optional[str] = "None"
+    size_matched: Optional[float] = None
     created_at: datetime = Field(default_factory=datetime.now)
     filled_at: Optional[datetime] = None
     error_message: Optional[str] = None
     strategy: Optional[str] = None  # Strategy name used for this order
+
+    # Transaction tracking for PNL
+    transaction_type: str = "BUY"  # BUY, SELL, MERGE, REDEEM
+    revenue_usd: Optional[float] = None  # For SELL/MERGE/REDEEM: actual USD received
+    cost_usd: Optional[float] = None  # For BUY: actual USD spent (same as size_usd)
+    pnl_usd: Optional[float] = None  # Calculated PNL for this transaction
 
 
 class BotState(BaseModel):

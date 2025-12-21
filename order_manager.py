@@ -453,6 +453,18 @@ class OrderManager:
 
             if not order_id:
                 logger.error(f"No order ID in post response: {post_response}")
+                # Determine transaction fields for failed order
+                if side == OrderSide.BUY:
+                    transaction_type = "BUY"
+                    cost_usd = size_usd
+                    revenue_usd = 0.0
+                    pnl_usd = -size_usd
+                else:
+                    transaction_type = "SELL"
+                    cost_usd = 0.0
+                    revenue_usd = size_usd
+                    pnl_usd = size_usd
+
                 return OrderRecord(
                     order_id="FAILED",
                     market_slug=market.market_slug,
@@ -465,10 +477,26 @@ class OrderManager:
                     size_usd=size_usd,
                     status=OrderStatus.FAILED,
                     error_message=f"No order ID in post response",
-                    strategy=strategy
+                    strategy=strategy,
+                    transaction_type=transaction_type,
+                    cost_usd=cost_usd,
+                    revenue_usd=revenue_usd,
+                    pnl_usd=pnl_usd
                 )
 
             logger.info(f"Order posted successfully to orderbook: {order_id}")
+
+            # Determine transaction fields based on order side
+            if side == OrderSide.BUY:
+                transaction_type = "BUY"
+                cost_usd = size_usd
+                revenue_usd = 0.0
+                pnl_usd = -size_usd
+            else:  # SELL
+                transaction_type = "SELL"
+                cost_usd = 0.0
+                revenue_usd = size_usd
+                pnl_usd = size_usd
 
             return OrderRecord(
                 order_id=order_id,
@@ -481,7 +509,11 @@ class OrderManager:
                 size=size,
                 size_usd=size_usd,
                 status=OrderStatus.PLACED,
-                strategy=strategy
+                strategy=strategy,
+                transaction_type=transaction_type,
+                cost_usd=cost_usd,
+                revenue_usd=revenue_usd,
+                pnl_usd=pnl_usd
             )
 
         except Exception as e:
@@ -502,6 +534,19 @@ class OrderManager:
                     logger.warning(f"API error but order was signed - may still be in orderbook: {order_id}")
 
                     # Return as potentially placed (verification will check orderbook)
+                    size_usd = price * size
+                    # Determine transaction fields based on order side
+                    if side == OrderSide.BUY:
+                        transaction_type = "BUY"
+                        cost_usd = size_usd
+                        revenue_usd = 0.0
+                        pnl_usd = -size_usd
+                    else:
+                        transaction_type = "SELL"
+                        cost_usd = 0.0
+                        revenue_usd = size_usd
+                        pnl_usd = size_usd
+
                     return OrderRecord(
                         order_id=order_id,
                         market_slug=market.market_slug,
@@ -511,13 +556,30 @@ class OrderManager:
                         side=side,
                         price=price,
                         size=size,
-                        size_usd=price * size,
+                        size_usd=size_usd,
                         status=OrderStatus.PLACED,  # Will be verified by verify_orders_in_orderbook()
                         error_message=f"API error (will verify): {e}",
-                        strategy=strategy
+                        strategy=strategy,
+                        transaction_type=transaction_type,
+                        cost_usd=cost_usd,
+                        revenue_usd=revenue_usd,
+                        pnl_usd=pnl_usd
                     )
 
             # If we couldn't get signed order, truly failed
+            size_usd = price * size
+            # Determine transaction fields for failed order
+            if side == OrderSide.BUY:
+                transaction_type = "BUY"
+                cost_usd = size_usd
+                revenue_usd = 0.0
+                pnl_usd = -size_usd
+            else:
+                transaction_type = "SELL"
+                cost_usd = 0.0
+                revenue_usd = size_usd
+                pnl_usd = size_usd
+
             return OrderRecord(
                 order_id="FAILED",
                 market_slug=market.market_slug,
@@ -527,10 +589,14 @@ class OrderManager:
                 side=side,
                 price=price,
                 size=0,
-                size_usd=price * size,
+                size_usd=size_usd,
                 status=OrderStatus.FAILED,
                 error_message=str(e),
-                strategy=strategy
+                strategy=strategy,
+                transaction_type=transaction_type,
+                cost_usd=cost_usd,
+                revenue_usd=revenue_usd,
+                pnl_usd=pnl_usd
             )
 
     def _place_single_order(
@@ -580,6 +646,18 @@ class OrderManager:
 
             if not order_id:
                 logger.error(f"No order ID in post response: {post_response}")
+                # Determine transaction fields for failed order
+                if side == OrderSide.BUY:
+                    transaction_type = "BUY"
+                    cost_usd = Config.ORDER_SIZE_USD
+                    revenue_usd = 0.0
+                    pnl_usd = -Config.ORDER_SIZE_USD
+                else:
+                    transaction_type = "SELL"
+                    cost_usd = 0.0
+                    revenue_usd = Config.ORDER_SIZE_USD
+                    pnl_usd = Config.ORDER_SIZE_USD
+
                 return OrderRecord(
                     order_id="FAILED",
                     market_slug=market.market_slug,
@@ -591,10 +669,26 @@ class OrderManager:
                     size=size,
                     size_usd=Config.ORDER_SIZE_USD,
                     status=OrderStatus.FAILED,
-                    error_message=f"No order ID in post response"
+                    error_message=f"No order ID in post response",
+                    transaction_type=transaction_type,
+                    cost_usd=cost_usd,
+                    revenue_usd=revenue_usd,
+                    pnl_usd=pnl_usd
                 )
 
             logger.info(f"Order posted successfully to orderbook: {order_id}")
+
+            # Determine transaction fields based on order side
+            if side == OrderSide.BUY:
+                transaction_type = "BUY"
+                cost_usd = Config.ORDER_SIZE_USD
+                revenue_usd = 0.0
+                pnl_usd = -Config.ORDER_SIZE_USD
+            else:
+                transaction_type = "SELL"
+                cost_usd = 0.0
+                revenue_usd = Config.ORDER_SIZE_USD
+                pnl_usd = Config.ORDER_SIZE_USD
 
             return OrderRecord(
                 order_id=order_id,
@@ -606,11 +700,27 @@ class OrderManager:
                 price=price,
                 size=size,
                 size_usd=Config.ORDER_SIZE_USD,
-                status=OrderStatus.PLACED
+                status=OrderStatus.PLACED,
+                transaction_type=transaction_type,
+                cost_usd=cost_usd,
+                revenue_usd=revenue_usd,
+                pnl_usd=pnl_usd
             )
 
         except Exception as e:
             logger.error(f"Error placing order: {e}", exc_info=True)
+            # Determine transaction fields for failed order
+            if side == OrderSide.BUY:
+                transaction_type = "BUY"
+                cost_usd = Config.ORDER_SIZE_USD
+                revenue_usd = 0.0
+                pnl_usd = -Config.ORDER_SIZE_USD
+            else:
+                transaction_type = "SELL"
+                cost_usd = 0.0
+                revenue_usd = Config.ORDER_SIZE_USD
+                pnl_usd = Config.ORDER_SIZE_USD
+
             return OrderRecord(
                 order_id="FAILED",
                 market_slug=market.market_slug,
@@ -622,7 +732,11 @@ class OrderManager:
                 size=0,
                 size_usd=Config.ORDER_SIZE_USD,
                 status=OrderStatus.FAILED,
-                error_message=str(e)
+                error_message=str(e),
+                transaction_type=transaction_type,
+                cost_usd=cost_usd,
+                revenue_usd=revenue_usd,
+                pnl_usd=pnl_usd
             )
 
     def check_order_status(self, order: OrderRecord) -> OrderRecord:
@@ -647,6 +761,7 @@ class OrderManager:
             status = order_details.get("status", "").upper()
             size_matched = float(order_details.get("size_matched", 0))
             original_size = float(order_details.get("original_size", order.size))
+            order.size_matched = size_matched
 
             if status == "MATCHED" or size_matched >= original_size:
                 order.status = OrderStatus.FILLED
@@ -669,6 +784,13 @@ class OrderManager:
                 if order.status != OrderStatus.PLACED:
                     order.status = OrderStatus.PLACED
                     logger.info(f"Order {order.order_id} still open")
+
+            # Update realized cost/revenue when fills occur
+            if order.status in [OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED] and size_matched > 0:
+                if order.side == OrderSide.BUY:
+                    order.cost_usd = order.price * size_matched
+                elif order.side == OrderSide.SELL:
+                    order.revenue_usd = order.price * size_matched
 
         except Exception as e:
             logger.error(f"Error checking order status for {order.order_id}: {e}")
@@ -807,7 +929,7 @@ class OrderManager:
                 logger.warning(f"Cannot sell size {size}")
                 return None
 
-            # Get current best bid (we'll sell at this price to get filled immediately)
+            # Get current best bid (we'll sell below this price to get filled immediately)
             market = self.update_market_prices(market)
 
             # Find the outcome
@@ -821,8 +943,21 @@ class OrderManager:
                 logger.error(f"No best bid available for {outcome.outcome}")
                 return None
 
-            # Sell at best bid to ensure quick fill
-            sell_price = self._adjust_price(target_outcome.best_bid, is_buy=False)
+            # If no best bid or too low, skip selling to avoid dumping at terrible prices
+            best_bid = target_outcome.best_bid
+            if not best_bid or best_bid <= 0:
+                logger.error(f"No best bid available for {outcome.outcome}")
+                return None
+
+            if best_bid < Config.MIN_SELL_PRICE:
+                logger.warning(
+                    f"Best bid {best_bid:.4f} is below MIN_SELL_PRICE {Config.MIN_SELL_PRICE:.2f} "
+                    f"for {outcome.outcome}; skipping market sell"
+                )
+                return None
+
+            # Sell aggressively below best bid to maximize fill probability
+            sell_price = self._adjust_price(best_bid - Config.MARKET_SELL_DISCOUNT, is_buy=False)
 
             logger.info(
                 f"Selling position: {outcome.outcome} @ ${sell_price:.2f} "
@@ -859,6 +994,7 @@ class OrderManager:
 
             logger.info(f"Market sell order posted to orderbook: {order_id}")
 
+            size_usd = sell_price * size
             return OrderRecord(
                 order_id=order_id,
                 market_slug=market.market_slug,
@@ -868,8 +1004,12 @@ class OrderManager:
                 side=OrderSide.SELL,
                 price=sell_price,
                 size=size,
-                size_usd=sell_price * size,
-                status=OrderStatus.PLACED
+                size_usd=size_usd,
+                status=OrderStatus.PLACED,
+                transaction_type="SELL",
+                cost_usd=0.0,
+                revenue_usd=size_usd,
+                pnl_usd=size_usd
             )
 
         except Exception as e:
@@ -1022,39 +1162,35 @@ class OrderManager:
                 logger.info(f"No actual tokens to merge for {market.market_slug}")
                 return 0.0
 
-            # Only merge if YES and NO amounts are equal (within tolerance)
+            # Merge the maximum equal sets (partial merge if imbalanced)
             MERGE_TOLERANCE = 0.001  # Allow small floating point differences
+            mergeable_amount = min(yes_amount, no_amount)
+            merge_amount = max(0.0, mergeable_amount - already_merged_amount)
 
-            if abs(yes_amount - no_amount) <= MERGE_TOLERANCE:
-                # Amounts are equal, proceed with merge
-                mergeable_amount = yes_amount
-                merge_amount = max(0.0, mergeable_amount - already_merged_amount)
+            if merge_amount <= MERGE_TOLERANCE:
+                logger.info(f"No new mergeable positions for {market.market_slug}")
+                return 0.0
 
-                if merge_amount > 0:
-                    logger.info(
-                        f"Found {merge_amount} new mergeable sets for {market.market_slug} "
-                        f"(total YES={yes_amount}, NO={no_amount}, merged={already_merged_amount})"
-                    )
-
-                    # Merge the positions
-                    merger = CTFMerger()
-                    tx_hash = merger.merge_positions(market.condition_id, merge_amount)
-
-                    if tx_hash:
-                        logger.info(f"Merged {merge_amount} sets -> {merge_amount} USDC")
-                        return merge_amount
-                    else:
-                        logger.error("Merge failed")
-                        return 0.0
-                else:
-                    logger.info(f"No new mergeable positions for {market.market_slug}")
-                    return 0.0
-            else:
-                # Amounts are not equal, skip merge
-                logger.debug(
-                    f"Skipping merge for {market.market_slug} - unequal positions "
-                    f"(YES={yes_amount}, NO={no_amount}, diff={abs(yes_amount - no_amount):.4f})"
+            if abs(yes_amount - no_amount) > MERGE_TOLERANCE:
+                logger.info(
+                    f"Partial merge available for {market.market_slug}: "
+                    f"YES={yes_amount}, NO={no_amount}, merging={merge_amount}"
                 )
+            else:
+                logger.info(
+                    f"Found {merge_amount} mergeable sets for {market.market_slug} "
+                    f"(YES={yes_amount}, NO={no_amount})"
+                )
+
+            # Merge the positions
+            merger = CTFMerger()
+            tx_hash = merger.merge_positions(market.condition_id, merge_amount)
+
+            if tx_hash:
+                logger.info(f"Merged {merge_amount} sets -> {merge_amount} USDC")
+                return merge_amount
+            else:
+                logger.error("Merge failed")
                 return 0.0
 
         except Exception as e:

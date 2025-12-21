@@ -62,13 +62,14 @@ class PolymarketBot:
         logger.info(f"Order placement window: {Config.ORDER_PLACEMENT_MIN_MINUTES}-{Config.ORDER_PLACEMENT_MAX_MINUTES} min before start")
         logger.info("=" * 60)
 
+        initial_balance = self.order_manager.get_usdc_balance()
         with self.lock:
             self.state.is_running = True
             # Initialize balance immediately so dashboard shows correct data
-            self.state.usdc_balance = self.order_manager.get_usdc_balance()
+            self.state.usdc_balance = initial_balance
             # Set an initial last_check so the dashboard has a baseline immediately
             self.state.last_check = datetime.now()
-            logger.info(f"Initial USDC balance: ${self.state.usdc_balance:.2f}")
+        logger.info(f"Initial USDC balance: ${initial_balance:.2f}")
 
         # Load persisted orders from file
         self._load_markets_from_file()
@@ -96,10 +97,47 @@ class PolymarketBot:
                 timedelta(seconds=Config.REDEEM_CHECK_INTERVAL_SECONDS)):
 
                 logger.info("Checking for redeemable positions...")
-                redeemed_count = self.auto_redeemer.check_and_redeem_all()
+                redeemed_count, redemption_details = self.auto_redeemer.check_and_redeem_all()
 
                 if redeemed_count > 0:
                     logger.info(f"✓ Claimed winnings from {redeemed_count} resolved markets")
+
+                    # Track redemptions in order history
+                    for redemption in redemption_details:
+                        condition_id = redemption['condition_id']
+                        market_slug = redemption['market_slug']
+                        amount = redemption['amount']
+
+                        # Try to find strategy from original orders for this market
+                        strategy = None
+                        if condition_id in self.active_orders:
+                            orders = self.active_orders[condition_id]
+                            if orders:
+                                strategy = orders[0].strategy
+
+                        # Create redemption record
+                        redeem_record = OrderRecord(
+                            order_id=f"REDEEM-{condition_id[:16]}-{int(datetime.now().timestamp())}",
+                            market_slug=market_slug,
+                            condition_id=condition_id,
+                            token_id="",
+                            outcome="REDEEM",
+                            side=OrderSide.SELL,
+                            price=1.0,
+                            size=amount,
+                            size_usd=amount,
+                            status=OrderStatus.FILLED,
+                            transaction_type="REDEEM",
+                            cost_usd=0.0,
+                            revenue_usd=amount,
+                            pnl_usd=amount,
+                            strategy=strategy,
+                            filled_at=datetime.now()
+                        )
+                        self._upsert_order_history(redeem_record)
+                        logger.info(f"Tracked redemption: ${amount:.2f} from {market_slug}")
+
+                    self._save_order_history()
 
                 self.last_redemption_check = datetime.now()
 
@@ -132,8 +170,9 @@ class PolymarketBot:
             self._cleanup_old_markets()
 
             # Step 6: Update state
+            current_balance = self.order_manager.get_usdc_balance()
             with self.lock:
-                self.state.usdc_balance = self.order_manager.get_usdc_balance()
+                self.state.usdc_balance = current_balance
                 self._update_order_lists()
 
         except Exception as e:
@@ -349,11 +388,28 @@ class PolymarketBot:
                     cancelled_count = self.order_manager.cancel_orders(unfilled)
                     logger.info(f"Cancelled {cancelled_count} orders")
 
-            # Step 2: Market sell filled positions
+            # Step 2: Merge if possible, then market sell any leftover imbalance
             if strategy_config.get("market_sell_filled", False):
                 # Get filled amounts
                 filled_amounts = self._get_filled_amounts(orders)
                 merged_amount = self.merged_amounts.get(market.condition_id, 0.0)
+
+                # Attempt merge first to reduce slippage
+                try:
+                    merge_amount = self.order_manager.merge_positions_if_possible(
+                        market,
+                        orders,
+                        already_merged_amount=merged_amount
+                    )
+                    if merge_amount > 0:
+                        self.merged_amounts[market.condition_id] = merged_amount + merge_amount
+                        merged_amount += merge_amount
+                        logger.info(
+                            f"Strategy exit: Merged {merge_amount:.2f} sets for {market.market_slug} "
+                            f"before selling leftovers"
+                        )
+                except Exception as merge_error:
+                    logger.warning(f"Strategy merge attempt failed: {merge_error}")
 
                 remaining_yes = max(0.0, filled_amounts["YES"] - merged_amount)
                 remaining_no = max(0.0, filled_amounts["NO"] - merged_amount)
@@ -430,6 +486,31 @@ class PolymarketBot:
                         self.merged_amounts[condition_id] = (
                             self.merged_amounts.get(condition_id, 0.0) + merged_amount
                         )
+
+                        # Track merge transaction in order history
+                        strategy = orders[0].strategy if orders else None
+                        merge_record = OrderRecord(
+                            order_id=f"MERGE-{condition_id[:16]}-{int(datetime.now().timestamp())}",
+                            market_slug=market.market_slug,
+                            condition_id=condition_id,
+                            token_id="",
+                            outcome="MERGE",
+                            side=OrderSide.SELL,
+                            price=1.0,
+                            size=merged_amount,
+                            size_usd=merged_amount * 1.0,
+                            status=OrderStatus.FILLED,
+                            transaction_type="MERGE",
+                            cost_usd=0.0,
+                            revenue_usd=merged_amount * 1.0,
+                            pnl_usd=merged_amount * 1.0,
+                            strategy=strategy,
+                            filled_at=datetime.now()
+                        )
+                        self._upsert_order_history(merge_record)
+                        self._save_order_history()
+                        logger.info(f"Tracked CTF merge: {merged_amount:.2f} pairs -> ${merged_amount:.2f} USDC")
+
                     self.last_merge_attempt[condition_id] = now
                     if self._all_positions_merged(orders, self.merged_amounts.get(condition_id, 0.0)):
                         self.positions_sold[condition_id] = True
@@ -475,7 +556,12 @@ class PolymarketBot:
                         f"{market.market_slug}"
                     )
                     cancelled_count = self.order_manager.cancel_orders(unfilled)
-                    if cancelled_count > 0:
+                    # Force-cancel any remaining open orders after market expiry
+                    for order in unfilled:
+                        if order.status in [OrderStatus.PLACED, OrderStatus.PARTIALLY_FILLED]:
+                            order.status = OrderStatus.CANCELLED
+                        self._upsert_order_history(order)
+                    if cancelled_count > 0 or unfilled:
                         status_changed = True
 
         # Save to file if any status changed
@@ -529,6 +615,31 @@ class PolymarketBot:
                                 self.merged_amounts.get(condition_id, 0.0) + merged_amount
                             )
                             changed = True
+
+                            # Track merge transaction in order history
+                            strategy = updated_orders[0].strategy if updated_orders else None
+                            merge_record = OrderRecord(
+                                order_id=f"MERGE-{condition_id[:16]}-{int(datetime.now().timestamp())}",
+                                market_slug=market_stub.market_slug,
+                                condition_id=condition_id,
+                                token_id="",
+                                outcome="MERGE",
+                                side=OrderSide.SELL,
+                                price=1.0,
+                                size=merged_amount,
+                                size_usd=merged_amount * 1.0,
+                                status=OrderStatus.FILLED,
+                                transaction_type="MERGE",
+                                cost_usd=0.0,
+                                revenue_usd=merged_amount * 1.0,
+                                pnl_usd=merged_amount * 1.0,
+                                strategy=strategy,
+                                filled_at=datetime.now()
+                            )
+                            self._upsert_order_history(merge_record)
+                            self._save_order_history()
+                            logger.info(f"Tracked CTF merge (orphan): {merged_amount:.2f} pairs -> ${merged_amount:.2f} USDC")
+
                         self.last_merge_attempt[condition_id] = now
                         if self._all_positions_merged(
                             updated_orders,
@@ -714,6 +825,15 @@ class PolymarketBot:
                 market = self.tracked_markets.get(condition_id)
                 market_name = market.market_slug if market else condition_id[:16]
 
+                # If the market is clearly expired, don't block new markets
+                if market and datetime.now().timestamp() > (market.end_timestamp + 300):
+                    if self._wallet_positions_are_cleared(orders):
+                        logger.info(f"Expired market {market_name}: positions cleared; skipping merge wait")
+                    else:
+                        logger.warning(f"Expired market {market_name}: residual positions remain; skipping merge wait")
+                    self.positions_sold[condition_id] = True
+                    continue
+
                 # Check if positions are merged (use wallet balance as source of truth)
                 if not self._wallet_positions_are_cleared(orders):
                     return True, f"waiting to merge positions in {market_name}"
@@ -749,8 +869,8 @@ class PolymarketBot:
             actual_yes = actual_balances.get(yes_token_id, 0.0)
             actual_no = actual_balances.get(no_token_id, 0.0)
 
-            # Positions are cleared if both are essentially zero
-            positions_cleared = actual_yes <= 0.001 and actual_no <= 0.001
+            # Positions are cleared if both are essentially zero (treat dust as cleared)
+            positions_cleared = actual_yes <= 0.01 and actual_no <= 0.01
 
             if not positions_cleared:
                 logger.debug(
@@ -906,6 +1026,9 @@ class PolymarketBot:
                 None
             )
 
+            # Get strategy from original orders to track in sell orders
+            strategy = orders[0].strategy if orders else None
+
             if remaining_yes > 0 and yes_outcome:
                 sell_order = self.order_manager.sell_position_market(
                     market=market,
@@ -913,6 +1036,12 @@ class PolymarketBot:
                     size=remaining_yes
                 )
                 if sell_order:
+                    # Inherit strategy from original orders
+                    sell_order.strategy = strategy
+                    # Save to order history
+                    self._upsert_order_history(sell_order)
+                    self._save_order_history()
+
                     logger.info(
                         f"Successfully placed sell order {sell_order.order_id} "
                         f"for {remaining_yes:.2f} shares at ${sell_order.price:.2f}"
@@ -928,6 +1057,12 @@ class PolymarketBot:
                     size=remaining_no
                 )
                 if sell_order:
+                    # Inherit strategy from original orders
+                    sell_order.strategy = strategy
+                    # Save to order history
+                    self._upsert_order_history(sell_order)
+                    self._save_order_history()
+
                     logger.info(
                         f"Successfully placed sell order {sell_order.order_id} "
                         f"for {remaining_no:.2f} shares at ${sell_order.price:.2f}"
@@ -974,10 +1109,15 @@ class PolymarketBot:
                         size=order_dict["size"],
                         size_usd=order_dict["size_usd"],
                         status=OrderStatus(order_dict["status"]),
+                        size_matched=order_dict.get("size_matched"),
                         created_at=datetime.fromisoformat(order_dict["created_at"]),
                         filled_at=datetime.fromisoformat(order_dict["filled_at"]) if order_dict.get("filled_at") else None,
                         error_message=order_dict.get("error_message"),
-                        strategy=order_dict.get("strategy")
+                        strategy=order_dict.get("strategy"),
+                        transaction_type=order_dict.get("transaction_type", "BUY"),
+                        revenue_usd=order_dict.get("revenue_usd"),
+                        cost_usd=order_dict.get("cost_usd"),
+                        pnl_usd=order_dict.get("pnl_usd")
                     )
                     self._upsert_order_history(order)
                 except Exception as e:
@@ -1004,10 +1144,15 @@ class PolymarketBot:
                     "size": order.size,
                     "size_usd": order.size_usd,
                     "status": order.status.value,
+                    "size_matched": order.size_matched,
                     "created_at": order.created_at.isoformat() if order.created_at else None,
                     "filled_at": order.filled_at.isoformat() if order.filled_at else None,
                     "error_message": order.error_message,
-                    "strategy": order.strategy
+                    "strategy": order.strategy,
+                    "transaction_type": order.transaction_type,
+                    "revenue_usd": order.revenue_usd,
+                    "cost_usd": order.cost_usd,
+                    "pnl_usd": order.pnl_usd
                 })
 
             history_list.sort(key=lambda o: o.get("created_at") or "", reverse=True)
@@ -1141,9 +1286,15 @@ class PolymarketBot:
                         "size": o.size,
                         "size_usd": o.size_usd,
                         "status": o.status.value,
+                        "size_matched": o.size_matched,
                         "created_at": o.created_at.isoformat(),
+                        "filled_at": o.filled_at.isoformat() if o.filled_at else None,
                         "error_message": o.error_message,
-                        "strategy": o.strategy
+                        "strategy": o.strategy,
+                        "transaction_type": o.transaction_type,
+                        "revenue_usd": o.revenue_usd,
+                        "cost_usd": o.cost_usd,
+                        "pnl_usd": o.pnl_usd
                     }
                     for o in orders
                 ]
@@ -1266,10 +1417,15 @@ class PolymarketBot:
                             size=order_dict["size"],
                             size_usd=order_dict["size_usd"],
                             status=OrderStatus(order_dict["status"]),
+                            size_matched=order_dict.get("size_matched"),
                             created_at=datetime.fromisoformat(order_dict["created_at"]),
                             filled_at=datetime.fromisoformat(order_dict["filled_at"]) if order_dict.get("filled_at") else None,
                             error_message=order_dict.get("error_message"),
-                            strategy=order_dict.get("strategy")
+                            strategy=order_dict.get("strategy"),
+                            transaction_type=order_dict.get("transaction_type", "BUY"),
+                            revenue_usd=order_dict.get("revenue_usd"),
+                            cost_usd=order_dict.get("cost_usd"),
+                            pnl_usd=order_dict.get("pnl_usd")
                         )
                         self.active_orders[condition_id].append(order)
                         if order.status in [OrderStatus.PLACED, OrderStatus.PARTIALLY_FILLED]:
@@ -1527,7 +1683,8 @@ class PolymarketBot:
     def get_state(self) -> BotState:
         """Get current bot state (thread-safe)."""
         with self.lock:
-            return self.state.model_copy(deep=True)
+            # Shallow copy is sufficient for read-only API responses and avoids slow deep copies.
+            return self.state.model_copy(deep=False)
 
 
 # Global bot instance for dashboard access

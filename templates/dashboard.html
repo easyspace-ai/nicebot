@@ -398,6 +398,19 @@
                     <div class="metric" id="unsuccessful-trades">0</div>
                     <div class="badge-chip danger">None or one fill</div>
                 </div>
+                <div class="card">
+                    <div class="card-title">Total PNL</div>
+                    <div class="metric" id="total-pnl">$0.00</div>
+                    <div class="badge-chip" id="pnl-badge">--</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Strategy Statistics Section -->
+        <div class="section">
+            <div class="section-title">Strategy Statistics</div>
+            <div id="strategy-stats-content">
+                <div class="empty-state">Loading strategy statistics...</div>
             </div>
         </div>
 
@@ -611,40 +624,6 @@
             }
         }
 
-        function groupOrders(orders) {
-            const grouped = {};
-            for (const order of orders) {
-                const key = [
-                    order.market_slug,
-                    order.side,
-                    order.price,
-                    order.size,
-                    order.size_usd
-                ].join('|');
-
-                if (!grouped[key]) {
-                    grouped[key] = {
-                        ...order,
-                        outcomes: [order.outcome],
-                        statuses: [order.status],
-                        count: 1,
-                        created_at: order.created_at
-                    };
-                } else {
-                    grouped[key].outcomes.push(order.outcome);
-                    grouped[key].statuses.push(order.status);
-                    grouped[key].count += 1;
-                    // Keep earliest timestamp for display
-                    if (order.created_at && grouped[key].created_at) {
-                        grouped[key].created_at = new Date(order.created_at) < new Date(grouped[key].created_at)
-                            ? order.created_at
-                            : grouped[key].created_at;
-                    }
-                }
-            }
-            return Object.values(grouped);
-        }
-
         async function updateOrders() {
             try {
                 const response = await fetch('/api/orders');
@@ -685,52 +664,69 @@
                     pendingContainer.innerHTML = html;
                 }
 
-                const recentContainer = document.getElementById('recent-orders-content');
-                const groupedRecent = data.recent_orders ? groupOrders(data.recent_orders) : [];
-
-                if (!groupedRecent || groupedRecent.length === 0) {
-                    recentContainer.innerHTML = '<div class="empty-state">No recent orders</div>';
-                } else {
-                    let html = '<div class="table-wrap"><table><thead><tr><th>Market</th><th>Outcome</th><th>Side</th><th>Price</th><th>Size</th><th>Status</th><th>Strategy</th><th>Created</th></tr></thead><tbody>';
-                    for (const order of groupedRecent) {
-                        const sideBadge = `<span class="badge-chip ${order.side.toLowerCase() === 'buy' ? 'success' : 'danger'}">${order.side}</span>`;
-                        const statusSet = Array.from(new Set(order.statuses || [order.status]));
-                        const statusLabel = statusSet.join(', ');
-                        const statusClass = statusSet.length === 1
-                            ? (statusSet[0] || '').toLowerCase()
-                            : 'mixed';
-                        const statusBadge = `<span class="badge-chip ${
-                            statusClass === 'placed' ? 'neutral'
-                            : statusClass === 'filled' ? 'success'
-                            : statusClass === 'cancelled' ? 'warning'
-                            : statusClass === 'mixed' ? 'neutral'
-                            : 'danger'
-                        }">${statusLabel}</span>`;
-                        const outcomesLabel = order.outcomes ? order.outcomes.join(', ') : order.outcome;
-                        const multiplier = order.count && order.count > 1 ? ` x${order.count}` : '';
-                        const strategyLabel = order.strategy || 'None';
-                        const strategyBadge = order.strategy
-                            ? `<span class="badge-chip neutral">${strategyLabel}</span>`
-                            : '<span class="badge-chip" style="opacity: 0.5;">N/A</span>';
-
-                        html += `
-                            <tr>
-                                <td data-label="Market">${order.market_slug}</td>
-                                <td data-label="Outcome">${outcomesLabel}</td>
-                                <td data-label="Side">${sideBadge}</td>
-                                <td data-label="Price">$${order.price.toFixed(3)}</td>
-                                <td data-label="Size">${order.size.toFixed(2)} ($${order.size_usd.toFixed(2)})${multiplier}</td>
-                                <td data-label="Status">${statusBadge}</td>
-                                <td data-label="Strategy">${strategyBadge}</td>
-                                <td data-label="Created">${formatTime(order.created_at)}</td>
-                            </tr>
-                        `;
-                    }
-                    html += '</tbody></table></div>';
-                    recentContainer.innerHTML = html;
-                }
+                await updateMarketHistory();
             } catch (error) {
                 console.error('Error updating orders:', error);
+            }
+        }
+
+        async function updateMarketHistory() {
+            try {
+                const response = await fetch('/api/market-history');
+                const data = await response.json();
+
+                const recentContainer = document.getElementById('recent-orders-content');
+                if (!data.markets || data.markets.length === 0) {
+                    recentContainer.innerHTML = '<div class="empty-state">No market history</div>';
+                    return;
+                }
+
+                let html = '<div class="table-wrap"><table><thead><tr><th>Market</th><th>Status</th><th>Result</th><th>Size</th><th>PNL</th><th>Strategy</th><th>Created</th></tr></thead><tbody>';
+                for (const market of data.markets) {
+                    let statusClass = 'neutral';
+                    if (market.status && market.status.startsWith('FILLED') && market.total_count > 0) {
+                        if (market.filled_count === 0) {
+                            statusClass = 'neutral';
+                        } else if (market.filled_count < market.total_count) {
+                            statusClass = 'warning';
+                        } else {
+                            statusClass = 'success';
+                        }
+                    } else if (market.status === 'PARTIALLY_FILLED') {
+                        statusClass = 'warning';
+                    } else if (market.status === 'CANCELLED' || market.status === 'FAILED') {
+                        statusClass = 'danger';
+                    }
+                    const statusBadge = `<span class="badge-chip ${statusClass}">${market.status}</span>`;
+
+                    const resultClass = market.result === 'SUCCESS' ? 'success'
+                        : market.result === 'FAILED' ? 'danger'
+                        : 'neutral';
+                    const resultBadge = `<span class="badge-chip ${resultClass}">${market.result}</span>`;
+
+                    const pnlClass = market.pnl > 0 ? 'success' : market.pnl < 0 ? 'danger' : 'neutral';
+                    const pnlBadge = `<span class="badge-chip ${pnlClass}">$${market.pnl.toFixed(2)}</span>`;
+
+                    const strategyBadge = `<span class="badge-chip neutral">${market.strategy}</span>`;
+
+                    html += `
+                        <tr>
+                            <td data-label="Market">${market.market_slug}</td>
+                            <td data-label="Status">${statusBadge}</td>
+                            <td data-label="Result">${resultBadge}</td>
+                            <td data-label="Size">$${market.total_cost.toFixed(2)}</td>
+                            <td data-label="PNL">${pnlBadge}</td>
+                            <td data-label="Strategy">${strategyBadge}</td>
+                            <td data-label="Created">${formatTime(market.created_at)}</td>
+                        </tr>
+                    `;
+                }
+                html += '</tbody></table></div>';
+                recentContainer.innerHTML = html;
+            } catch (error) {
+                console.error('Error updating market history:', error);
+                document.getElementById('recent-orders-content').innerHTML =
+                    '<div class="empty-state">Error loading market history</div>';
             }
         }
 
@@ -768,8 +764,78 @@
                 document.getElementById('total-markets').textContent = stats.total_markets;
                 document.getElementById('successful-trades').textContent = stats.successful_trades;
                 document.getElementById('unsuccessful-trades').textContent = stats.unsuccessful_trades;
+
+                // Update PNL display
+                const pnl = stats.total_pnl || 0;
+                document.getElementById('total-pnl').textContent = `$${pnl.toFixed(2)}`;
+
+                const pnlBadge = document.getElementById('pnl-badge');
+                if (pnl > 0) {
+                    pnlBadge.textContent = 'Profit';
+                    pnlBadge.className = 'badge-chip success';
+                } else if (pnl < 0) {
+                    pnlBadge.textContent = 'Loss';
+                    pnlBadge.className = 'badge-chip danger';
+                } else {
+                    pnlBadge.textContent = 'Break Even';
+                    pnlBadge.className = 'badge-chip neutral';
+                }
             } catch (error) {
                 console.error('Error updating statistics:', error);
+            }
+        }
+
+        async function updateStrategyStatistics() {
+            try {
+                const response = await fetch('/api/strategy-statistics');
+                const data = await response.json();
+                const container = document.getElementById('strategy-stats-content');
+
+                if (!data.strategies || data.strategies.length === 0) {
+                    container.innerHTML = '<div class="empty-state">No strategy data available</div>';
+                    return;
+                }
+
+                let html = '';
+                for (const strategy of data.strategies) {
+                    const pnlClass = strategy.total_pnl > 0 ? 'success' :
+                                   strategy.total_pnl < 0 ? 'danger' : 'neutral';
+                    const pnlLabel = strategy.total_pnl > 0 ? 'Profit' :
+                                    strategy.total_pnl < 0 ? 'Loss' : 'Break Even';
+
+                    html += `
+                        <div style="margin-bottom: 20px;">
+                            <h3 style="color: var(--accent-2); margin-bottom: 12px; font-size: 1rem;">
+                                ${strategy.strategy_name === 'None' ? 'No Strategy (Legacy)' : strategy.strategy_name}
+                            </h3>
+                            <div class="grid">
+                                <div class="card">
+                                    <div class="card-title">Markets</div>
+                                    <div class="metric">${strategy.total_markets}</div>
+                                </div>
+                                <div class="card">
+                                    <div class="card-title">Successful</div>
+                                    <div class="metric">${strategy.successful_trades}</div>
+                                </div>
+                                <div class="card">
+                                    <div class="card-title">Unsuccessful</div>
+                                    <div class="metric">${strategy.unsuccessful_trades}</div>
+                                </div>
+                                <div class="card">
+                                    <div class="card-title">PNL</div>
+                                    <div class="metric">$${strategy.total_pnl.toFixed(2)}</div>
+                                    <div class="badge-chip ${pnlClass}">${pnlLabel}</div>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }
+
+                container.innerHTML = html;
+            } catch (error) {
+                console.error('Error updating strategy statistics:', error);
+                document.getElementById('strategy-stats-content').innerHTML =
+                    '<div class="empty-state">Error loading strategy statistics</div>';
             }
         }
 
@@ -777,6 +843,7 @@
             await Promise.all([
                 updateStatus(),
                 updateStatistics(),
+                updateStrategyStatistics(),
                 updateMarkets(),
                 updateOrders(),
                 updateLogs()
@@ -831,7 +898,10 @@
         }
 
         updateAll();
-        setInterval(updateAll, 5000);
+        setInterval(updateAll, 10000);
+        setInterval(updateStatistics, 30000);
+        setInterval(updateStrategyStatistics, 30000);
+        setInterval(updateLogs, 60000);
     </script>
 </body>
 </html>

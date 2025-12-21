@@ -102,11 +102,11 @@ class CTFMerger:
             receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
 
             if receipt.status == 1:
-                logger.info(f"✓ Successfully merged {amount} position sets!")
+                logger.info(f"SUCCESS: Merged {amount} position sets!")
                 logger.info(f"Gas used: {receipt.gasUsed}")
                 return tx_hash.hex()
             else:
-                logger.error(f"✗ Merge transaction reverted")
+                logger.error(f"ERROR: Merge transaction reverted")
                 return None
 
         except Exception as e:
