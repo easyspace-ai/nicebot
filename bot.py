@@ -173,6 +173,14 @@ class PolymarketBot:
             current_balance = self.order_manager.get_usdc_balance()
             with self.lock:
                 self.state.usdc_balance = current_balance
+                # Keep total_pnl in-state for dashboard parity (sum of order_history pnl_usd)
+                try:
+                    self.state.total_pnl = sum(
+                        float(o.pnl_usd or 0.0) for o in self.order_history.values()
+                    )
+                except Exception:
+                    # Best-effort: never break the loop for stats
+                    self.state.total_pnl = 0.0
                 self._update_order_lists()
 
         except Exception as e:
@@ -253,15 +261,18 @@ class PolymarketBot:
         )
 
         try:
-            # Place simple test orders: 2 orders (1 Yes, 1 No) at $0.49, 10 shares each
             from config import Config
 
-            orders = self.order_manager.place_simple_test_orders(
-                market=market,
-                price=0.49,
-                size=10.0,
-                strategy=Config.STRATEGY_NAME
-            )
+            if (Config.ORDER_MODE or "").lower().strip() == "liquidity":
+                orders = self.order_manager.place_liquidity_orders(market)
+            else:
+                # Place simple test orders: 2 orders (1 Yes, 1 No) at $0.49, 10 shares each
+                orders = self.order_manager.place_simple_test_orders(
+                    market=market,
+                    price=0.49,
+                    size=10.0,
+                    strategy=Config.STRATEGY_NAME
+                )
 
             if orders:
                 # Mark as placed
@@ -727,12 +738,15 @@ class PolymarketBot:
         try:
             from config import Config
 
-            orders = self.order_manager.place_simple_test_orders(
-                market=next_market,
-                price=0.49,
-                size=10.0,
-                strategy=Config.STRATEGY_NAME
-            )
+            if (Config.ORDER_MODE or "").lower().strip() == "liquidity":
+                orders = self.order_manager.place_liquidity_orders(next_market)
+            else:
+                orders = self.order_manager.place_simple_test_orders(
+                    market=next_market,
+                    price=0.49,
+                    size=10.0,
+                    strategy=Config.STRATEGY_NAME
+                )
 
             if orders:
                 self.orders_placed[next_market.condition_id] = True

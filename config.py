@@ -28,6 +28,7 @@ class Config:
 
     # Strategy Configuration
     STRATEGY_NAME: str = os.getenv("STRATEGY_NAME", "quick_exit_7_5min")
+    ORDER_MODE: str = os.getenv("ORDER_MODE", "test")  # test | liquidity
 
     # Strategy Parameters
     STRATEGY_PARAMS = {
