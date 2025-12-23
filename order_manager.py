@@ -834,6 +834,10 @@ class OrderManager:
                     order.status = OrderStatus.FAILED
                     order.size = 0
                     order.size_usd = 0
+                    # Keep stats consistent: failed verification shouldn't contribute cost/revenue/pnl.
+                    order.cost_usd = 0.0
+                    order.revenue_usd = 0.0
+                    order.pnl_usd = 0.0
                     if not order.error_message:
                         order.error_message = "Order not found in orderbook after placement"
                     logger.warning(f"✗ Order {order.order_id[:16]}... NOT in orderbook - marking as FAILED")

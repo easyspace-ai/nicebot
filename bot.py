@@ -173,6 +173,14 @@ class PolymarketBot:
             current_balance = self.order_manager.get_usdc_balance()
             with self.lock:
                 self.state.usdc_balance = current_balance
+                # Keep total_pnl in-state for dashboard parity (sum of order_history pnl_usd)
+                try:
+                    self.state.total_pnl = sum(
+                        float(o.pnl_usd or 0.0) for o in self.order_history.values()
+                    )
+                except Exception:
+                    # Best-effort: never break the loop for stats
+                    self.state.total_pnl = 0.0
                 self._update_order_lists()
 
         except Exception as e:

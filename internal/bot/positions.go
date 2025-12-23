@@ -110,7 +110,14 @@ func (b *Bot) sellPositionMarket(ctx context.Context, market models.Market, outc
 	if price < b.cfg.MinSellPrice {
 		price = b.cfg.MinSellPrice
 	}
-	price = math.Round(price*100) / 100
+	// Round to market tick size (best-effort), to avoid CreateOrder tick validation failures.
+	tick := 0.01
+	if ts, err := b.clob.GetTickSize(ctx, outcome.TokenID); err == nil {
+		if f, ok := parseTickSize(ts); ok && f > 0 {
+			tick = f
+		}
+	}
+	price = adjustPriceToTick(price, tick)
 
 	orderArgs := clob.OrderArgs{
 		TokenID:    outcome.TokenID,

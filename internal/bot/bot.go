@@ -261,6 +261,17 @@ func (b *Bot) RunOnce(ctx context.Context) {
 		b.mu.Unlock()
 	}
 
+	// Update state.total_pnl from order history (best-effort, parity with python)
+	totalPNL := 0.0
+	for _, o := range b.orderHistory {
+		if o.PNLUSD != nil {
+			totalPNL += *o.PNLUSD
+		}
+	}
+	b.mu.Lock()
+	b.state.TotalPNL = totalPNL
+	b.mu.Unlock()
+
 	b.updateOrderLists()
 }
 

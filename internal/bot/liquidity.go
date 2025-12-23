@@ -44,8 +44,15 @@ func (b *Bot) placeLiquidityOrders(ctx context.Context, market models.Market) ([
 			continue
 		}
 
-		buyPrice := adjustPrice(*outcome.BestBid-b.cfg.SpreadOffset, true)
-		sellPrice := adjustPrice(*outcome.BestAsk+b.cfg.SpreadOffset, false)
+		tick := 0.01
+		if ts, err := b.clob.GetTickSize(ctx, outcome.TokenID); err == nil {
+			if f, ok := parseTickSize(ts); ok && f > 0 {
+				tick = f
+			}
+		}
+
+		buyPrice := adjustPriceToTick(*outcome.BestBid-b.cfg.SpreadOffset, tick)
+		sellPrice := adjustPriceToTick(*outcome.BestAsk+b.cfg.SpreadOffset, tick)
 
 		// BUY
 		buyShares := calculateShares(buyPrice, b.cfg.OrderSizeUSD)
@@ -77,15 +84,38 @@ func calculateShares(price float64, usd float64) float64 {
 	return math.Round((usd/price)*100) / 100
 }
 
-func adjustPrice(price float64, _ bool) float64 {
-	// Clamp to [0.01, 0.99] and round to 0.01 (match python).
-	if price < 0.01 {
-		price = 0.01
+func adjustPriceToTick(price float64, tick float64) float64 {
+	// Clamp to [tick, 1-tick] and round to nearest tick.
+	if tick <= 0 {
+		tick = 0.01
 	}
-	if price > 0.99 {
-		price = 0.99
+	minP := tick
+	maxP := 1.0 - tick
+	if price < minP {
+		price = minP
 	}
-	return math.Round(price*100) / 100
+	if price > maxP {
+		price = maxP
+	}
+	steps := math.Round(price / tick)
+	price = steps * tick
+	// mitigate float drift
+	return math.Round(price*1e6) / 1e6
+}
+
+func parseTickSize(ts clob.TickSize) (float64, bool) {
+	switch string(ts) {
+	case "0.1":
+		return 0.1, true
+	case "0.01":
+		return 0.01, true
+	case "0.001":
+		return 0.001, true
+	case "0.0001":
+		return 0.0001, true
+	default:
+		return 0, false
+	}
 }
 
 func (b *Bot) placeSingleOrderBestEffort(
@@ -224,6 +254,10 @@ func (b *Bot) verifyOrdersInOrderbook(ctx context.Context, market models.Market,
 			o.Status = models.OrderStatusFailed
 			o.Size = 0
 			o.SizeUSD = 0
+			// Keep stats consistent: failed verification shouldn't contribute cost/revenue/pnl.
+			o.CostUSD = floatPtr(0)
+			o.RevenueUSD = floatPtr(0)
+			o.PNLUSD = floatPtr(0)
 			if o.ErrorMessage == nil {
 				msg := "Order not found in orderbook after placement"
 				o.ErrorMessage = &msg
