@@ -31,6 +31,21 @@ A production-ready automated trading bot that provides liquidity on Polymarket's
 - Polygon wallet with USDC
 - Private key for your wallet
 
+### Golang 版本（1:1 端口）
+
+本仓库已提供 **Go 实现**（保留 `.env`/JSON 落盘格式与 Dashboard UI），入口为：
+
+- 运行 bot + dashboard：
+  - `go run ./cmd/polymarket-bot run --mode both`
+- 仅运行 bot：
+  - `go run ./cmd/polymarket-bot run --mode bot`
+- 仅运行 dashboard（仍会启动 bot 线程，保持与原版一致）：
+  - `go run ./cmd/polymarket-bot run --mode dashboard`
+- 配置检查：
+  - `go run ./cmd/polymarket-bot check-config`
+- 连接测试：
+  - `go run ./cmd/polymarket-bot test-connection`
+
 ### Installation
 
 1. Clone this repository:
