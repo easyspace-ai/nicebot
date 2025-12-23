@@ -36,6 +36,7 @@ type Bot struct {
 	lastMergeAttempt map[string]time.Time
 	mergedAmounts    map[string]float64
 	positionsSold    map[string]bool
+	strategyExecuted map[string]bool
 
 	lastRedemptionCheck *time.Time
 
@@ -72,6 +73,7 @@ func New(cfg config.Config) (*Bot, error) {
 		lastMergeAttempt: map[string]time.Time{},
 		mergedAmounts:    map[string]float64{},
 		positionsSold:    map[string]bool{},
+		strategyExecuted: map[string]bool{},
 		ordersFile:       "bot_orders.json",
 		orderHistoryFile: "order_history.json",
 		marketsFile:      "markets_state.json",
@@ -119,6 +121,11 @@ func (b *Bot) Start(ctx context.Context) error {
 		logger.Printf("WARNING: Could not derive API creds (read-only mode): %v\n", err)
 	}
 
+	// Recover existing open orders from orderbook (if L2 auth available)
+	if b.clob != nil {
+		_ = b.recoverExistingOrders(ctx)
+	}
+
 	now := time.Now()
 	b.mu.Lock()
 	b.state.IsRunning = true
@@ -145,6 +152,10 @@ func (b *Bot) WalletAddress() string {
 		return ""
 	}
 	return b.clob.Address()
+}
+
+func (b *Bot) OrdersPlaced(conditionID string) bool {
+	return b.ordersPlaced[conditionID]
 }
 
 func (b *Bot) RunOnce(ctx context.Context) {
@@ -174,6 +185,8 @@ func (b *Bot) RunOnce(ctx context.Context) {
 		return
 	}
 	upcoming := b.filterUpcoming(markets, now)
+	// Fill market prices for dashboard (best-effort)
+	upcoming = b.fillMarketPrices(ctx, upcoming)
 
 	b.mu.Lock()
 	b.state.ActiveMarkets = upcoming
@@ -207,6 +220,9 @@ func (b *Bot) RunOnce(ctx context.Context) {
 
 	// Step 3: check active orders
 	b.checkActiveOrders(ctx)
+
+	// Step 3.5: strategy timeout exit (cancel + merge + sell leftovers)
+	b.checkStrategyExecution(ctx, now)
 
 	// Step 4: refresh balance
 	bal, err := b.chain.USDCBalance(ctx)
@@ -336,6 +352,7 @@ func (b *Bot) placeSingleFixed(ctx context.Context, market models.Market, outcom
 	sizeUSD := price * size
 	cost := sizeUSD
 	pnl := -sizeUSD
+	strategy := b.cfg.StrategyName
 	return models.OrderRecord{
 		OrderID:         orderID,
 		MarketSlug:      market.MarketSlug,
@@ -348,6 +365,7 @@ func (b *Bot) placeSingleFixed(ctx context.Context, market models.Market, outcom
 		SizeUSD:         sizeUSD,
 		Status:          models.OrderStatusPlaced,
 		CreatedAt:       time.Now(),
+		Strategy:        &strategy,
 		TransactionType: "BUY",
 		CostUSD:         &cost,
 		RevenueUSD:      floatPtr(0),
@@ -402,6 +420,7 @@ func (b *Bot) checkActiveOrders(ctx context.Context) {
 			if last.IsZero() || time.Since(last) >= 30*time.Second {
 				merged := b.mergePositionsIfPossible(ctx, market, orders)
 				if merged > 0 {
+					b.trackMerge(market, merged)
 					changed = true
 				}
 				b.lastMergeAttempt[cid] = time.Now()

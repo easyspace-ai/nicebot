@@ -375,6 +375,78 @@ func (c *Client) Cancel(ctx context.Context, orderID string) (any, error) {
 	return doJSON(ctx, c.http, http.MethodDelete, c.host+EndpointCancel, headers, b)
 }
 
+type OpenOrderParams struct {
+	Market  string
+	AssetID string
+	ID      string
+}
+
+const endCursor = "LTE="
+const defaultCursor = "MA=="
+
+func (c *Client) GetOrders(ctx context.Context, params *OpenOrderParams) ([]map[string]any, error) {
+	if c.signer == nil {
+		return nil, ErrAuthUnavailableL1
+	}
+	if c.creds == nil {
+		return nil, ErrAuthUnavailableL2
+	}
+	headers, err := c.level2Headers(http.MethodGet, EndpointOrders, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	next := defaultCursor
+	var out []map[string]any
+	for next != endCursor {
+		u := c.host + EndpointOrders
+		u = addOpenOrdersQuery(u, params, next)
+		resp, err := doJSON(ctx, c.http, http.MethodGet, u, headers, nil)
+		if err != nil {
+			return nil, err
+		}
+		m, ok := resp.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("unexpected orders response: %T", resp)
+		}
+		next = asString(m["next_cursor"])
+		if next == "" {
+			next = endCursor
+		}
+		data, _ := m["data"].([]any)
+		for _, v := range data {
+			om, _ := v.(map[string]any)
+			if om != nil {
+				out = append(out, om)
+			}
+		}
+	}
+	return out, nil
+}
+
+func addOpenOrdersQuery(base string, params *OpenOrderParams, nextCursor string) string {
+	u := base
+	q := url.Values{}
+	if params != nil {
+		if params.Market != "" {
+			q.Set("market", params.Market)
+		}
+		if params.AssetID != "" {
+			q.Set("asset_id", params.AssetID)
+		}
+		if params.ID != "" {
+			q.Set("id", params.ID)
+		}
+	}
+	if nextCursor != "" {
+		q.Set("next_cursor", nextCursor)
+	}
+	if len(q) == 0 {
+		return u
+	}
+	return u + "?" + q.Encode()
+}
+
 func (c *Client) level1Headers(nonce int64) (map[string]string, error) {
 	ts := time.Now().Unix()
 	sig, err := SignClobAuthMessage(c.signer, ts, nonce)

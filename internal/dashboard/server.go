@@ -120,7 +120,7 @@ func (s *Server) handleMarkets(w http.ResponseWriter, r *http.Request) {
 			"is_active":                  m.IsActive,
 			"is_resolved":                m.IsResolved,
 			"outcomes":                   outcomesForAPI(m.Outcomes),
-			"orders_placed":              false,
+			"orders_placed":              s.bot.OrdersPlaced(m.ConditionID),
 		})
 	}
 	sort.Slice(markets, func(i, j int) bool {

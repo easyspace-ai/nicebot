@@ -137,6 +137,7 @@ func (b *Bot) sellPositionMarket(ctx context.Context, market models.Market, outc
 	sizeUSD := price * size
 	rev := sizeUSD
 	pnl := sizeUSD
+	strategy := b.cfg.StrategyName
 	rec := models.OrderRecord{
 		OrderID:         orderID,
 		MarketSlug:      market.MarketSlug,
@@ -149,6 +150,7 @@ func (b *Bot) sellPositionMarket(ctx context.Context, market models.Market, outc
 		SizeUSD:         sizeUSD,
 		Status:          models.OrderStatusPlaced,
 		CreatedAt:       time.Now(),
+		Strategy:        &strategy,
 		TransactionType: "SELL",
 		RevenueUSD:      &rev,
 		CostUSD:         floatPtr(0),
@@ -195,6 +197,18 @@ func bestBidFromBook(book map[string]any) float64 {
 		return 0
 	}
 	first, _ := bids[0].(map[string]any)
+	if first == nil {
+		return 0
+	}
+	return asFloat(first["price"])
+}
+
+func bestAskFromBook(book map[string]any) float64 {
+	asks, _ := book["asks"].([]any)
+	if len(asks) == 0 {
+		return 0
+	}
+	first, _ := asks[0].(map[string]any)
 	if first == nil {
 		return 0
 	}
