@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
+	"sort"
 	"sync"
 	"time"
 
@@ -209,7 +209,16 @@ func (b *Bot) RunOnce(ctx context.Context) {
 			continue
 		}
 		logger.Printf("Placing orders for %s (starts in %.1f minutes)\n", m.MarketSlug, m.TimeUntilStart(now).Minutes())
-		orders, err := b.placeSimpleTestOrders(ctx, m, 0.49, 10.0)
+		var (
+			orders []models.OrderRecord
+			err    error
+		)
+		switch strings.ToLower(strings.TrimSpace(b.cfg.OrderMode)) {
+		case "liquidity":
+			orders, err = b.placeLiquidityOrders(ctx, m)
+		default:
+			orders, err = b.placeSimpleTestOrders(ctx, m, 0.49, 10.0)
+		}
 		if err != nil {
 			b.recordError(err)
 			continue
@@ -232,7 +241,12 @@ func (b *Bot) RunOnce(ctx context.Context) {
 	b.checkStrategyExecution(ctx, now)
 
 	// Step 3.6: fallback orders if idle (python parity)
-	b.placeFallbackOrdersIfIdle(ctx, upcoming, now)
+	if strings.ToLower(strings.TrimSpace(b.cfg.OrderMode)) == "liquidity" {
+		// For liquidity mode, fallback means placing liquidity orders too.
+		b.placeFallbackLiquidityIfIdle(ctx, upcoming, now)
+	} else {
+		b.placeFallbackOrdersIfIdle(ctx, upcoming, now)
+	}
 
 	// Step 5: cleanup old markets (>24h) (python parity)
 	b.cleanupOldMarkets(ctx, now)

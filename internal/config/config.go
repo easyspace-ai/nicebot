@@ -34,6 +34,7 @@ type Config struct {
 	MinSellPrice               float64
 	MarketSellDiscount         float64
 	StrategyName               string
+	OrderMode                  string
 	GammaAPIBaseURL            string
 	ClobAPIURL                 string
 	RPCURL                     string
@@ -82,6 +83,7 @@ func Load() (Config, error) {
 			MarketSellDiscount:         mustFloat("MARKET_SELL_DISCOUNT", 0.02),
 
 			StrategyName: envOr("STRATEGY_NAME", "quick_exit_7_5min"),
+			OrderMode:    envOr("ORDER_MODE", "test"),
 
 			GammaAPIBaseURL:         envOr("GAMMA_API_BASE_URL", "https://gamma-api.polymarket.com"),
 			ClobAPIURL:              envOr("CLOB_API_URL", "https://clob.polymarket.com"),

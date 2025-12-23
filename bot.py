@@ -253,15 +253,18 @@ class PolymarketBot:
         )
 
         try:
-            # Place simple test orders: 2 orders (1 Yes, 1 No) at $0.49, 10 shares each
             from config import Config
 
-            orders = self.order_manager.place_simple_test_orders(
-                market=market,
-                price=0.49,
-                size=10.0,
-                strategy=Config.STRATEGY_NAME
-            )
+            if (Config.ORDER_MODE or "").lower().strip() == "liquidity":
+                orders = self.order_manager.place_liquidity_orders(market)
+            else:
+                # Place simple test orders: 2 orders (1 Yes, 1 No) at $0.49, 10 shares each
+                orders = self.order_manager.place_simple_test_orders(
+                    market=market,
+                    price=0.49,
+                    size=10.0,
+                    strategy=Config.STRATEGY_NAME
+                )
 
             if orders:
                 # Mark as placed
@@ -727,12 +730,15 @@ class PolymarketBot:
         try:
             from config import Config
 
-            orders = self.order_manager.place_simple_test_orders(
-                market=next_market,
-                price=0.49,
-                size=10.0,
-                strategy=Config.STRATEGY_NAME
-            )
+            if (Config.ORDER_MODE or "").lower().strip() == "liquidity":
+                orders = self.order_manager.place_liquidity_orders(next_market)
+            else:
+                orders = self.order_manager.place_simple_test_orders(
+                    market=next_market,
+                    price=0.49,
+                    size=10.0,
+                    strategy=Config.STRATEGY_NAME
+                )
 
             if orders:
                 self.orders_placed[next_market.condition_id] = True
