@@ -117,6 +117,8 @@ func (b *Bot) Start(ctx context.Context) error {
 	if err == nil && creds.APIKey != "" {
 		b.clob.SetCreds(creds)
 		logger.Println("CLOB API creds derived and set successfully")
+		// Mirror python: try to update L2 balance allowance on startup.
+		b.updateL2BalanceAllowanceBestEffort(ctx)
 	} else {
 		logger.Printf("WARNING: Could not derive API creds (read-only mode): %v\n", err)
 	}
