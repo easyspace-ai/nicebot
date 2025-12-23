@@ -18,6 +18,7 @@ import (
 
 const (
 	USDCeAddress = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+	USDCAddress  = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
 	CTFAddress   = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 )
 
@@ -60,20 +61,45 @@ func (c *Client) EthClient() *ethclient.Client { return c.ec }
 
 func (c *Client) USDCBalance(ctx context.Context) (float64, error) {
 	contract := common.HexToAddress(USDCeAddress)
-	data, err := erc20ABI.Pack("balanceOf", c.address)
+	return c.ERC20BalanceFloat6(ctx, contract)
+}
+
+func (c *Client) ERC20BalanceOf(ctx context.Context, token, owner common.Address) (*big.Int, error) {
+	data, err := erc20ABI.Pack("balanceOf", owner)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	res, err := c.ec.CallContract(ctx, ethereum.CallMsg{To: &contract, Data: data}, nil)
+	res, err := c.ec.CallContract(ctx, ethereum.CallMsg{To: &token, Data: data}, nil)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	out, err := erc20ABI.Unpack("balanceOf", res)
 	if err != nil {
+		return nil, err
+	}
+	return out[0].(*big.Int), nil
+}
+
+func (c *Client) ERC20BalanceFloat6(ctx context.Context, token common.Address) (float64, error) {
+	bal, err := c.ERC20BalanceOf(ctx, token, c.address)
+	if err != nil {
 		return 0, err
 	}
-	bal := out[0].(*big.Int)
 	f := new(big.Rat).SetFrac(bal, big.NewInt(1_000_000))
+	val, _ := f.Float64()
+	return val, nil
+}
+
+func (c *Client) NativeBalance(ctx context.Context) (*big.Int, error) {
+	return c.ec.BalanceAt(ctx, c.address, nil)
+}
+
+func (c *Client) NativeBalanceFloat18(ctx context.Context) (float64, error) {
+	bal, err := c.NativeBalance(ctx)
+	if err != nil {
+		return 0, err
+	}
+	f := new(big.Rat).SetFrac(bal, big.NewInt(1_000_000_000_000_000_000))
 	val, _ := f.Float64()
 	return val, nil
 }

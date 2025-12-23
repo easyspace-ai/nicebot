@@ -375,6 +375,60 @@ func (c *Client) Cancel(ctx context.Context, orderID string) (any, error) {
 	return doJSON(ctx, c.http, http.MethodDelete, c.host+EndpointCancel, headers, b)
 }
 
+type BalanceAllowanceParams struct {
+	AssetType      string
+	TokenID        string
+	SignatureType  int
+}
+
+func (c *Client) GetBalanceAllowance(ctx context.Context, params *BalanceAllowanceParams) (map[string]any, error) {
+	if c.signer == nil {
+		return nil, ErrAuthUnavailableL1
+	}
+	if c.creds == nil {
+		return nil, ErrAuthUnavailableL2
+	}
+	headers, err := c.level2Headers(http.MethodGet, EndpointBalanceAllowance, nil)
+	if err != nil {
+		return nil, err
+	}
+	u := c.host + EndpointBalanceAllowance
+	u = addBalanceAllowanceQuery(u, params, c.sigType)
+	resp, err := doJSON(ctx, c.http, http.MethodGet, u, headers, nil)
+	if err != nil {
+		return nil, err
+	}
+	m, ok := resp.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("unexpected balance-allowance response: %T", resp)
+	}
+	return m, nil
+}
+
+func (c *Client) UpdateBalanceAllowance(ctx context.Context, params *BalanceAllowanceParams) (map[string]any, error) {
+	if c.signer == nil {
+		return nil, ErrAuthUnavailableL1
+	}
+	if c.creds == nil {
+		return nil, ErrAuthUnavailableL2
+	}
+	headers, err := c.level2Headers(http.MethodGet, EndpointBalanceAllowanceUpdt, nil)
+	if err != nil {
+		return nil, err
+	}
+	u := c.host + EndpointBalanceAllowanceUpdt
+	u = addBalanceAllowanceQuery(u, params, c.sigType)
+	resp, err := doJSON(ctx, c.http, http.MethodGet, u, headers, nil)
+	if err != nil {
+		return nil, err
+	}
+	m, ok := resp.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("unexpected balance-allowance/update response: %T", resp)
+	}
+	return m, nil
+}
+
 type OpenOrderParams struct {
 	Market  string
 	AssetID string
@@ -440,6 +494,29 @@ func addOpenOrdersQuery(base string, params *OpenOrderParams, nextCursor string)
 	}
 	if nextCursor != "" {
 		q.Set("next_cursor", nextCursor)
+	}
+	if len(q) == 0 {
+		return u
+	}
+	return u + "?" + q.Encode()
+}
+
+func addBalanceAllowanceQuery(base string, params *BalanceAllowanceParams, defaultSigType int) string {
+	u := base
+	q := url.Values{}
+	if params != nil {
+		if params.AssetType != "" {
+			q.Set("asset_type", params.AssetType)
+		}
+		if params.TokenID != "" {
+			q.Set("token_id", params.TokenID)
+		}
+		if params.SignatureType != 0 {
+			q.Set("signature_type", fmt.Sprintf("%d", params.SignatureType))
+		}
+	}
+	if q.Get("signature_type") == "" {
+		q.Set("signature_type", fmt.Sprintf("%d", defaultSigType))
 	}
 	if len(q) == 0 {
 		return u

@@ -20,6 +20,13 @@ func Execute() int {
 	root.AddCommand(newMergeCmd())
 	root.AddCommand(newAllowancesCmd())
 	root.AddCommand(newCTFCmd())
+	root.AddCommand(newCLOBCmd())
+	root.AddCommand(newUSDCCmd())
+	root.AddCommand(newTxCmd())
+	root.AddCommand(newRedeemAllCmd())
+	root.AddCommand(newClaimWinningsCmd())
+	root.AddCommand(newPositionsCmd())
+	root.AddCommand(newWalletCmd())
 
 	if err := root.Execute(); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)
