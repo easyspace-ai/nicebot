@@ -218,6 +218,10 @@ func (b *Bot) RunOnce(ctx context.Context) {
 		switch strings.ToLower(strings.TrimSpace(b.cfg.OrderMode)) {
 		case "liquidity":
 			orders, err = b.placeLiquidityOrders(ctx, m)
+		case "split":
+			// Split策略：先split，然后根据盘口不均衡挂单套利
+			config := DefaultSplitStrategyConfig()
+			orders, err = b.executeSplitStrategy(ctx, m, config)
 		default:
 			orders, err = b.placeSimpleTestOrders(ctx, m, 0.49, 10.0)
 		}
